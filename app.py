@@ -1,11 +1,11 @@
-# app.py — DEFRA BNG Metric Reader (Styled + Surplus Flag)
-# - Supports .xlsx / .xlsm / .xlsb (no macros run)
-# - Robust Headline Results parser (Unit Type table or derive from baseline/post)
-# - Distinctiveness from raw (captures "Very High/High/Medium/Low Distinctiveness" headers)
+# app.py — DEFRA BNG Metric Reader (Flows + NG-in-Matrix + Explainer)
+# - .xlsx / .xlsm / .xlsb (no macros run)
+# - Robust Headline Results parser (table or derive)
+# - Distinctiveness from raw section headers
 # - Broad Group from the cell to the right of Habitat
-# - Area trading rules + Medium-in-group + Low→Headline + Net Gain remainder
-# - HERO card: "Still needs mitigation OFF-SITE (after offsets + Low→Headline)" front-and-center
-# - NEW: Surplus overflow flag when Medium/High/VH cascades + Low→Headline leave overall surplus
+# - Area trading rules + flows ledger (who mitigates whom, how much)
+# - Low→Headline recorded as flows into the same matrix (so NG coverage is visible)
+# - Hero card + KPIs + surplus flag + maths explainer
 
 import io
 import os
@@ -17,9 +17,7 @@ import streamlit as st
 
 st.set_page_config(page_title="DEFRA BNG Metric Reader", page_icon="🌿", layout="wide")
 
-# -----------------------------------
-# Global CSS
-# -----------------------------------
+# ---------------- CSS ----------------
 st.markdown(
     """
     <style>
@@ -39,50 +37,51 @@ st.markdown(
       .kpi { display: grid; gap: .3rem; padding: .8rem 1rem; border-radius: 14px; border: 1px solid rgba(120,120,120,0.12); background: rgba(180,180,180,0.06); }
       .kpi .label { opacity: .75; font-size: .8rem; } .kpi .value { font-weight: 700; font-size: 1.2rem; }
       .exp-label { font-weight: 700; font-size: .98rem; }
+      .explain-card{
+        border-radius:16px; padding:14px 16px; margin:0 0 12px 0;
+        background: var(--explain-bg, rgba(255,255,255,0.65));
+        border:1px solid rgba(120,120,120,0.12);
+        box-shadow: 0 3px 14px rgba(0,0,0,.06);
+        backdrop-filter: blur(6px);
+      }
+      @media (prefers-color-scheme: dark){
+        .explain-card{ --explain-bg: rgba(24,24,24,0.55); border-color: rgba(255,255,255,0.08); }
+      }
+      .explain-card h4{ margin:0 0 .25rem 0; font-weight:700; }
+      .explain-card p{ margin:.25rem 0; }
+      .explain-card ul{ margin:.4rem 0 .2rem 1.2rem; }
+      .explain-kv{ opacity:.85; font-size:.92rem; }
+      .explain-kv code{ font-weight:700; }
       div[data-testid="stDataFrame"] { border-radius: 14px; overflow: hidden; }
     </style>
     """,
     unsafe_allow_html=True,
 )
 
-# -----------------------------------
-# Workbook openers (xlsx / xlsm / xlsb) — macros NOT executed
-# -----------------------------------
+# ------------- open workbook -------------
 def open_metric_workbook(uploaded_file) -> pd.ExcelFile:
     data = uploaded_file.read() if hasattr(uploaded_file, "read") else uploaded_file
     name = getattr(uploaded_file, "name", "") or ""
     ext = os.path.splitext(name)[1].lower()
-
     if ext in [".xlsx", ".xlsm", ""]:
-        try:
-            return pd.ExcelFile(io.BytesIO(data), engine="openpyxl")
-        except Exception:
-            pass
+        try: return pd.ExcelFile(io.BytesIO(data), engine="openpyxl")
+        except Exception: pass
     if ext == ".xlsb":
-        try:
-            return pd.ExcelFile(io.BytesIO(data), engine="pyxlsb")
-        except Exception:
-            pass
-
+        try: return pd.ExcelFile(io.BytesIO(data), engine="pyxlsb")
+        except Exception: pass
     for eng in ("openpyxl", "pyxlsb"):
-        try:
-            return pd.ExcelFile(io.BytesIO(data), engine=eng)
-        except Exception:
-            continue
-
+        try: return pd.ExcelFile(io.BytesIO(data), engine=eng)
+        except Exception: continue
     raise RuntimeError("Could not open workbook. Try re-saving as .xlsx or .xlsm.")
 
-# -----------------------------------
-# Utilities
-# -----------------------------------
+# ------------- utils -------------
 def clean_text(x) -> str:
     if x is None or (isinstance(x, float) and pd.isna(x)): return ""
-    s = str(x).strip()
-    return re.sub(r"\s+", " ", s)
+    return re.sub(r"\s+", " ", str(x).strip())
 
 def canon(s: str) -> str:
-    s = clean_text(s).lower().replace("–", "-").replace("—", "-")
-    return re.sub(r"[^a-z0-9]+", "_", s).strip("_")
+    s = clean_text(s).lower().replace("–","-").replace("—","-")
+    return re.sub(r"[^a-z0-9]+","_", s).strip("_")
 
 def coerce_num(s: pd.Series) -> pd.Series:
     return pd.to_numeric(s, errors="coerce")
@@ -90,11 +89,9 @@ def coerce_num(s: pd.Series) -> pd.Series:
 def find_sheet(xls: pd.ExcelFile, targets: List[str]) -> Optional[str]:
     existing = {canon(s): s for s in xls.sheet_names}
     for t in targets:
-        if canon(t) in existing:
-            return existing[canon(t)]
+        if canon(t) in existing: return existing[canon(t)]
     for s in xls.sheet_names:
-        if any(canon(t) in canon(s) for t in targets):
-            return s
+        if any(canon(t) in canon(s) for t in targets): return s
     return None
 
 def find_header_row(df: pd.DataFrame, within_rows: int = 80) -> Optional[int]:
@@ -113,9 +110,7 @@ def col_like(df: pd.DataFrame, *cands: str) -> Optional[str]:
         if any(canon(c) in k for c in cands): return v
     return None
 
-# -----------------------------------
-# Trading Summary loaders
-# -----------------------------------
+# ------------- loaders -------------
 def load_raw_sheet(xls: pd.ExcelFile, sheet: str) -> pd.DataFrame:
     return pd.read_excel(xls, sheet_name=sheet, header=None)
 
@@ -131,32 +126,26 @@ def load_trading_df(xls: pd.ExcelFile, sheet: str) -> Tuple[pd.DataFrame, pd.Dat
     df = df.dropna(how="all").reset_index(drop=True)
     return df, raw
 
-# -----------------------------------
-# Broad Group (right of Habitat)
-# -----------------------------------
+# ------------- broad group from right -------------
 def resolve_broad_group_col(df: pd.DataFrame, habitat_col: str, broad_col_guess: Optional[str]) -> Optional[str]:
     try:
         h_idx = df.columns.get_loc(habitat_col)
         adj = df.columns[h_idx + 1] if h_idx + 1 < len(df.columns) else None
     except Exception:
         adj = None
-
     def looks_like_group(col: Optional[str]) -> bool:
         if not col or col not in df.columns: return False
         name = canon(col)
-        if any(k in name for k in ["group", "broad_habitat"]): return True
+        if any(k in name for k in ["group","broad_habitat"]): return True
         ser = df[col].dropna()
         if ser.empty: return False
         return pd.to_numeric(ser, errors="coerce").notna().mean() < 0.2
-
     if adj and looks_like_group(adj) and "unit_change" not in canon(adj): return adj
     if broad_col_guess and looks_like_group(broad_col_guess): return broad_col_guess
     if adj and "unit_change" not in canon(adj): return adj
     return broad_col_guess
 
-# -----------------------------------
-# Distinctiveness tagging from RAW
-# -----------------------------------
+# ------------- distinctiveness from raw headers -------------
 VH_PAT = re.compile(r"\bvery\s*high\b.*distinct", re.I)
 H_PAT  = re.compile(r"\bhigh\b.*distinct", re.I)
 M_PAT  = re.compile(r"\bmedium\b.*distinct", re.I)
@@ -167,7 +156,6 @@ def build_band_map_from_raw(raw: pd.DataFrame, habitats: List[str]) -> Dict[str,
     band_map: Dict[str, str] = {}
     active_band: Optional[str] = None
     max_scan_cols = min(8, raw.shape[1])
-
     for r in range(len(raw)):
         texts = []
         for c in range(max_scan_cols):
@@ -175,13 +163,11 @@ def build_band_map_from_raw(raw: pd.DataFrame, habitats: List[str]) -> Dict[str,
             if isinstance(val, str) or (isinstance(val, float) and not pd.isna(val)):
                 texts.append(clean_text(val))
         joined = " ".join([t for t in texts if t]).strip()
-
         if joined:
             if VH_PAT.search(joined): active_band = "Very High"
             elif H_PAT.search(joined) and not VH_PAT.search(joined): active_band = "High"
             elif M_PAT.search(joined): active_band = "Medium"
             elif L_PAT.search(joined): active_band = "Low"
-
         if active_band:
             for c in range(raw.shape[1]):
                 val = raw.iat[r, c]
@@ -191,9 +177,7 @@ def build_band_map_from_raw(raw: pd.DataFrame, habitats: List[str]) -> Dict[str,
                         band_map[v] = active_band
     return band_map
 
-# -----------------------------------
-# Normalise Trading Summary
-# -----------------------------------
+# ------------- normalise (generic) -------------
 def normalise_requirements(
     xls: pd.ExcelFile,
     sheet_candidates: List[str],
@@ -204,7 +188,6 @@ def normalise_requirements(
         return pd.DataFrame(columns=[
             "category","habitat","broad_group","distinctiveness","project_wide_change","on_site_change"
         ]), {}, sheet
-
     df, raw = load_trading_df(xls, sheet)
     habitat_col = col_like(df, "Habitat", "Feature")
     broad_col_guess = col_like(df, "Habitat group", "Broad habitat", "Group")
@@ -214,17 +197,14 @@ def normalise_requirements(
         return pd.DataFrame(columns=[
             "category","habitat","broad_group","distinctiveness","project_wide_change","on_site_change"
         ]), {}, sheet
-
     broad_col = resolve_broad_group_col(df, habitat_col, broad_col_guess)
     df = df[~df[habitat_col].isna()]
     df = df[df[habitat_col].astype(str).str.strip() != ""].copy()
     for c in [proj_col, ons_col]:
         if c in df.columns: df[c] = coerce_num(df[c])
-
     habitat_list = df[habitat_col].astype(str).map(clean_text).tolist()
     band_map = build_band_map_from_raw(raw, habitat_list)
     df["__distinctiveness__"] = df[habitat_col].astype(str).map(lambda x: band_map.get(clean_text(x), pd.NA))
-
     out = pd.DataFrame({
         "category": category_label,
         "habitat": df[habitat_col],
@@ -233,26 +213,20 @@ def normalise_requirements(
         "project_wide_change": df[proj_col],
         "on_site_change": df[ons_col] if ons_col in df.columns else pd.NA,
     })
-
     colmap = {
-        "habitat": habitat_col,
-        "broad_group": broad_col or "",
-        "project_wide_change": proj_col,
-        "on_site_change": ons_col or "",
+        "habitat": habitat_col, "broad_group": broad_col or "",
+        "project_wide_change": proj_col, "on_site_change": ons_col or "",
         "distinctiveness_from_raw": "__distinctiveness__",
     }
     return out.reset_index(drop=True), colmap, sheet
 
-# -----------------------------------
-# Area trading rules + allocation
-# -----------------------------------
+# ------------- area trading rules -------------
 def can_offset_area(d_band: str, d_broad: str, d_hab: str,
                     s_band: str, s_broad: str, s_hab: str) -> bool:
     rank = {"Low":1, "Medium":2, "High":3, "Very High":4}
     rd = rank.get(str(d_band), 0); rs = rank.get(str(s_band), 0)
     d_broad = clean_text(d_broad); s_broad = clean_text(s_broad)
     d_hab = clean_text(d_hab); s_hab = clean_text(s_hab)
-
     if d_band == "Very High": return d_hab == s_hab
     if d_band == "High":      return d_hab == s_hab
     if d_band == "Medium":    return (d_broad != "" and d_broad == s_broad) and (rs >= rd)
@@ -260,100 +234,118 @@ def can_offset_area(d_band: str, d_broad: str, d_hab: str,
     return False
 
 def apply_area_offsets(area_df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
+    """
+    Apply rules AND record actual flows between habitats.
+    Returns:
+      - allocation_flows: rows of (deficit -> surplus used)
+      - residual_off_site: unmet per deficit
+      - surplus_remaining_by_band: aggregates after offsets
+      - surplus_after_offsets_detail: per-surplus remaining units (for Low→Headline allocation)
+    """
     data = area_df.copy()
     data["project_wide_change"] = coerce_num(data["project_wide_change"])
     deficits = data[data["project_wide_change"] < 0].copy()
     surpluses = data[data["project_wide_change"] > 0].copy()
 
-    elig_rows = []
-    for _, d in deficits.iterrows():
-        for _, s in surpluses.iterrows():
-            if can_offset_area(str(d["distinctiveness"]), d.get("broad_group",""), d.get("habitat",""),
-                               str(s["distinctiveness"]), s.get("broad_group",""), s.get("habitat","")):
-                elig_rows.append({
-                    "deficit_habitat": clean_text(d.get("habitat","")),
-                    "deficit_broad": clean_text(d.get("broad_group","")),
-                    "deficit_band": d["distinctiveness"],
-                    "deficit_units": abs(float(d["project_wide_change"])),
-                    "surplus_habitat": clean_text(s.get("habitat","")),
-                    "surplus_broad": clean_text(s.get("broad_group","")),
-                    "surplus_band": s["distinctiveness"],
-                    "surplus_units": float(s["project_wide_change"]),
-                })
-    elig_df = pd.DataFrame(elig_rows)
+    # Working copy to track remaining
+    sur = surpluses.copy()
+    sur["__remain__"] = sur["project_wide_change"].astype(float)
 
-    band_rank = {"Low":1, "Medium":2, "High":3, "Very High":4}
-    sur = surpluses.copy(); sur["__remain__"] = sur["project_wide_change"].astype(float)
+    band_rank = {"Low": 1, "Medium": 2, "High": 3, "Very High": 4}
+    flow_rows = []
 
-    remaining_records = []
     for _, d in deficits.iterrows():
         need = abs(float(d["project_wide_change"]))
-        d_band = str(d["distinctiveness"]); d_broad = d.get("broad_group",""); d_hab = d.get("habitat","")
-
+        d_band  = str(d["distinctiveness"])
+        d_broad = clean_text(d.get("broad_group",""))
+        d_hab   = clean_text(d.get("habitat",""))
         elig_idx = [si for si, s in sur.iterrows()
                     if can_offset_area(d_band, d_broad, d_hab,
-                                       str(s["distinctiveness"]), s.get("broad_group",""), s.get("habitat",""))
+                                       str(s["distinctiveness"]), clean_text(s.get("broad_group","")),
+                                       clean_text(s.get("habitat","")))
                     and sur.loc[si,"__remain__"] > 0]
-        elig_idx = sorted(elig_idx, key=lambda i: (-band_rank.get(str(sur.loc[i,"distinctiveness"]),0),
-                                                   -sur.loc[i,"__remain__"]))
+        elig_idx = sorted(elig_idx,
+                          key=lambda i: (-band_rank.get(str(sur.loc[i,"distinctiveness"]),0),
+                                         -sur.loc[i,"__remain__"]))
         for i in elig_idx:
-            use = min(need, sur.loc[i,"__remain__"])
-            if use > 0:
-                sur.loc[i,"__remain__"] -= use; need -= use
             if need <= 1e-9: break
+            give = min(need, float(sur.loc[i,"__remain__"]))
+            if give <= 0: continue
+            flow_rows.append({
+                "deficit_habitat": d_hab,
+                "deficit_broad": d_broad,
+                "deficit_band": d_band,
+                "surplus_habitat": clean_text(sur.loc[i,"habitat"]),
+                "surplus_broad": clean_text(sur.loc[i,"broad_group"]),
+                "surplus_band": str(sur.loc[i,"distinctiveness"]),
+                "units_transferred": round(give, 6),
+                "flow_type": "habitat→habitat"
+            })
+            sur.loc[i,"__remain__"] -= give
+            need -= give
 
-        if need > 1e-9:
+    # Residual unmet deficits
+    remaining_records = []
+    got_by_deficit = {}
+    for r in flow_rows:
+        key = (r["deficit_habitat"], r["deficit_broad"], r["deficit_band"])
+        got_by_deficit[key] = got_by_deficit.get(key, 0.0) + r["units_transferred"]
+    for _, d in deficits.iterrows():
+        key = (clean_text(d.get("habitat","")), clean_text(d.get("broad_group","")), str(d["distinctiveness"]))
+        original_need = abs(float(d["project_wide_change"]))
+        received = got_by_deficit.get(key, 0.0)
+        unmet = max(original_need - received, 0.0)
+        if unmet > 1e-9:
             remaining_records.append({
-                "habitat": clean_text(d_hab),
-                "broad_group": clean_text(d_broad),
-                "distinctiveness": d_band,
-                "unmet_units_after_on_site_offset": round(need, 4)
+                "habitat": key[0],
+                "broad_group": key[1],
+                "distinctiveness": key[2],
+                "unmet_units_after_on_site_offset": round(unmet, 6)
             })
 
     surplus_remaining_by_band = sur.groupby("distinctiveness", dropna=False)["__remain__"] \
                                    .sum().reset_index() \
                                    .rename(columns={"distinctiveness":"band","__remain__":"surplus_remaining_units"})
 
+    # detail table (needed for Low→Headline allocation)
+    surplus_after_offsets_detail = sur.rename(columns={"__remain__":"surplus_remaining_units"})[
+        ["habitat","broad_group","distinctiveness","surplus_remaining_units"]
+    ].copy()
+
     return {
         "deficits": deficits.sort_values("project_wide_change"),
         "surpluses": surpluses.sort_values("project_wide_change", ascending=False),
-        "eligibility": elig_df,
+        "allocation_flows": pd.DataFrame(flow_rows) if flow_rows else pd.DataFrame(
+            columns=["deficit_habitat","deficit_broad","deficit_band",
+                     "surplus_habitat","surplus_broad","surplus_band",
+                     "units_transferred","flow_type"]
+        ),
         "surplus_remaining_by_band": surplus_remaining_by_band,
+        "surplus_after_offsets_detail": surplus_after_offsets_detail,
         "residual_off_site": pd.DataFrame(remaining_records).sort_values(
             ["distinctiveness","unmet_units_after_on_site_offset"], ascending=[False, False]
         ).reset_index(drop=True)
     }
 
-# -----------------------------------
-# Headline Results parser (Area habitat units → Unit Deficit)
-# -----------------------------------
+# ------------- headline parser (Area Unit Deficit) -------------
 def parse_headline_area_deficit(xls: pd.ExcelFile) -> Optional[float]:
-    """
-    'Headline Results' → Unit Type table: Area habitat units → Unit Deficit (or Shortfall).
-    Fallback: derive from on/off-site baseline & post-intervention totals.
-    """
     SHEET_NAME = "Headline Results"
-
     def clean(s):
         if s is None or (isinstance(s, float) and pd.isna(s)): return ""
         return re.sub(r"\s+", " ", str(s).strip())
-
     def last_numeric_in_row(row) -> Optional[float]:
         ser = pd.Series(row).map(lambda x: re.sub(r"[✓▲^]", "", str(x)) if isinstance(x, str) else x)
         nums = pd.to_numeric(ser, errors="coerce").dropna()
         return float(nums.iloc[-1]) if not nums.empty else None
-
     try:
         raw = pd.read_excel(xls, sheet_name=SHEET_NAME, header=None)
     except Exception:
         return None
-
     header_idx = None
     for i in range(min(200, len(raw))):
         txt = " ".join([clean(x).lower() for x in raw.iloc[i].tolist()])
         if "unit type" in txt and (("unit deficit" in txt) or ("shortfall" in txt) or ("deficit" in txt)):
             header_idx = i; break
-
     if header_idx is not None:
         df = raw.iloc[header_idx:].copy()
         df.columns = [clean(x) for x in df.iloc[0].tolist()]
@@ -363,20 +355,17 @@ def parse_headline_area_deficit(xls: pd.ExcelFile) -> Optional[float]:
             if " ".join([clean(v) for v in df.iloc[r].tolist()]) == "":
                 stop_at = r; break
         if stop_at is not None: df = df.iloc[:stop_at].copy()
-
         norm = {re.sub(r"[^a-z0-9]+","_", c.lower()).strip("_"): c for c in df.columns}
         unit_col = next((norm[k] for k in ["unit_type","type","unit"] if k in norm), None)
         deficit_col = next((norm[k] for k in ["unit_deficit","units_deficit","deficit","shortfall","unit_shortfall","deficit_units"] if k in norm), None)
         if deficit_col is None:
             for col in df.columns:
                 if re.search(r"(deficit|shortfall)", col, re.I): deficit_col = col; break
-
         def is_area_row(row) -> bool:
             if unit_col:
                 val = clean(row.get(unit_col, "")).lower()
                 if re.search(r"\barea\s*habitat\s*units\b", val): return True
             return re.search(r"\barea\s*habitat\s*units\b", " ".join([clean(v).lower() for v in row.tolist()])) is not None
-
         mask = df.apply(is_area_row, axis=1)
         if mask.any():
             row = df.loc[mask].iloc[0]
@@ -385,8 +374,7 @@ def parse_headline_area_deficit(xls: pd.ExcelFile) -> Optional[float]:
                 if pd.notna(v): return float(v)
             ln = last_numeric_in_row(row.tolist())
             if ln is not None: return ln
-
-    # Fallback derive
+    # derive fallback
     vals = {}
     for i in range(len(raw)):
         line = " ".join([clean(x).lower() for x in raw.iloc[i].tolist()])
@@ -398,7 +386,6 @@ def parse_headline_area_deficit(xls: pd.ExcelFile) -> Optional[float]:
             vals["on_p"] = last_numeric_in_row(raw.iloc[i].tolist())
         elif re.search(r"\boff[-\s]?site\b.*post[-\s]?intervention.*habitat units", line):
             vals["off_p"] = last_numeric_in_row(raw.iloc[i].tolist())
-
     if any(k in vals for k in ["on_b","off_b","on_p","off_p"]):
         on_b  = vals.get("on_b")  or 0.0
         off_b = vals.get("off_b") or 0.0
@@ -409,12 +396,65 @@ def parse_headline_area_deficit(xls: pd.ExcelFile) -> Optional[float]:
         net_change     = post_total - baseline_total
         required_10pc  = 0.10 * baseline_total
         return float(max(required_10pc - net_change, 0.0))
-
     return None
 
-# -----------------------------------
-# UI
-# -----------------------------------
+# ------------- explainer builder -------------
+def build_area_explanation(
+    alloc: Dict[str, pd.DataFrame],
+    headline_def: Optional[float],
+    low_available: float,
+    applied_low_to_headline: Optional[float],
+    residual_headline_after_low: Optional[float],
+    remaining_ng_to_quote: Optional[float],
+    ng_flow_rows: List[dict]
+) -> str:
+    lines = []
+
+    flows = alloc.get("allocation_flows", pd.DataFrame())
+    if not flows.empty:
+        lines.append("**On-site offsets applied (by trading rules):**")
+        for (dh, db, dband), grp in flows.groupby(["deficit_habitat","deficit_broad","deficit_band"], dropna=False):
+            total = grp["units_transferred"].sum()
+            bullet = f"- **{dh}** ({dband}{', ' + db if db else ''}) — deficit reduced by **{total:.4f}** units via:"
+            sub = []
+            for _, r in grp.sort_values("units_transferred", ascending=False).iterrows():
+                sub.append(f"    - {r['surplus_habitat']} ({r['surplus_band']}{', ' + r['surplus_broad'] if r['surplus_broad'] else ''}) → **{r['units_transferred']:.4f}**")
+            lines.append(bullet)
+            lines.extend(sub)
+    else:
+        lines.append("**On-site offsets applied:** none matched by trading rules.")
+
+    residuals = alloc.get("residual_off_site", pd.DataFrame())
+    if not residuals.empty:
+        lines.append("\n**Habitat-specific residuals still to mitigate off-site:**")
+        for _, r in residuals.iterrows():
+            lines.append(f"- {r['habitat']} ({r['distinctiveness']}{', ' + str(r['broad_group']) if pd.notna(r['broad_group']) and str(r['broad_group']).strip() else ''}) → **{float(r['unmet_units_after_on_site_offset']):.4f}** units")
+    else:
+        lines.append("\n**Habitat-specific residuals:** none remain after on-site offsets.")
+
+    H = 0.0 if headline_def is None else float(headline_def)
+    used_low = 0.0 if applied_low_to_headline is None else float(applied_low_to_headline)
+    R = 0.0 if residual_headline_after_low is None else float(residual_headline_after_low)
+    NG = 0.0 if remaining_ng_to_quote is None else float(remaining_ng_to_quote)
+
+    lines.append(
+        f"\n**Headline (10% Net Gain):** requirement **{H:.4f}** units. "
+        f"Available Low surplus **{low_available:.4f}** → applied **{used_low:.4f}**, leaving **{R:.4f}**."
+    )
+
+    if ng_flow_rows:
+        lines.append("  - Low surplus used against Headline came from:")
+        for r in ng_flow_rows:
+            lines.append(f"    - {r['surplus_habitat']} ({r['surplus_band']}{', ' + r['surplus_broad'] if r['surplus_broad'] else ''}) → **{r['units_transferred']:.4f}**")
+
+    if NG > 1e-9:
+        lines.append(f"**Net Gain remainder to quote (after habitat residuals):** **{NG:.4f}** units.")
+    else:
+        lines.append("**Net Gain remainder:** fully covered (no additional NG units to buy).")
+
+    return "\n".join(lines)
+
+# ---------------- UI ----------------
 st.title("🌿 DEFRA BNG Metric Reader")
 
 with st.sidebar:
@@ -464,9 +504,7 @@ water_norm, water_map, water_sheet = normalise_requirements(xls, WATER_SHEETS, "
 
 tabs = st.tabs(["Area Habitats", "Hedgerows", "Watercourses", "Exports"])
 
-# -----------------------------------
-# Area Habitats tab (HERO + expanders + surplus flag)
-# -----------------------------------
+# ---------- AREA ----------
 with tabs[0]:
     st.subheader("Trading Summary — Area Habitats")
     if area_norm.empty:
@@ -474,24 +512,70 @@ with tabs[0]:
     else:
         st.caption(f"Source sheet: `{area_sheet or 'not found'}`")
 
+        # 1) On-site offsets between habitats (flows)
         alloc = apply_area_offsets(area_norm)
+
+        # 2) Headline deficit & Low→Headline
         headline_def = parse_headline_area_deficit(xls)
 
-        low_remaining = float(
-            alloc["surplus_remaining_by_band"]
-            .loc[alloc["surplus_remaining_by_band"]["band"] == "Low", "surplus_remaining_units"]
-            .sum() if not alloc["surplus_remaining_by_band"].empty else 0.0
-        )
-        applied_low_to_headline = min(headline_def, low_remaining) if headline_def is not None else None
+        # Prepare per-surplus remaining detail to pull Low into Headline as explicit flows
+        surplus_detail = alloc["surplus_after_offsets_detail"].copy()
+        surplus_detail["surplus_remaining_units"] = coerce_num(surplus_detail["surplus_remaining_units"]).fillna(0.0)
+
+        # Low surplus total available
+        low_remaining = float(surplus_detail.loc[surplus_detail["distinctiveness"]=="Low","surplus_remaining_units"].sum())
+
+        # Amount to apply from Low onto Headline
+        applied_low_to_headline = min(headline_def or 0.0, low_remaining) if headline_def is not None else 0.0
         residual_headline_after_low = (headline_def - applied_low_to_headline) if headline_def is not None else None
 
+        # Generate explicit NG coverage flows from Low surpluses (largest-first)
+        ng_flow_rows = []
+        if applied_low_to_headline and applied_low_to_headline > 1e-9:
+            low_items = surplus_detail[surplus_detail["distinctiveness"]=="Low"].copy()
+            low_items = low_items.sort_values("surplus_remaining_units", ascending=False)
+            to_cover = applied_low_to_headline
+            for _, s in low_items.iterrows():
+                if to_cover <= 1e-9: break
+                give = float(min(to_cover, s["surplus_remaining_units"]))
+                if give <= 0: continue
+                ng_flow_rows.append({
+                    "deficit_habitat": "Net Gain uplift (Headline)",
+                    "deficit_broad": "—",
+                    "deficit_band": "Net Gain",
+                    "surplus_habitat": clean_text(s["habitat"]),
+                    "surplus_broad": clean_text(s["broad_group"]),
+                    "surplus_band": "Low",
+                    "units_transferred": round(give, 6),
+                    "flow_type": "low→headline"
+                })
+                to_cover -= give
+
+        # Combine habitat flows + NG flows into one matrix so the story is traceable
+        flows_matrix = pd.concat(
+            [alloc["allocation_flows"], pd.DataFrame(ng_flow_rows)],
+            ignore_index=True
+        ) if ng_flow_rows else alloc["allocation_flows"].copy()
+
+        # Surplus remaining by band (after subtracting what we used for Headline from Low)
+        surplus_by_band = alloc["surplus_remaining_by_band"].copy()
+        if applied_low_to_headline and applied_low_to_headline > 0:
+            mask_low = surplus_by_band["band"] == "Low"
+            if mask_low.any():
+                surplus_by_band.loc[mask_low, "surplus_remaining_units"] = (
+                    surplus_by_band.loc[mask_low, "surplus_remaining_units"] - applied_low_to_headline
+                ).clip(lower=0)
+
+        # Habitat residuals after on-site offsets
         residual_table = alloc["residual_off_site"].copy()
         sum_habitat_residuals = float(residual_table["unmet_units_after_on_site_offset"].sum()) if not residual_table.empty else 0.0
 
+        # Net Gain remainder to quote = (Headline after Low) − (habitat residuals)
         remaining_ng_to_quote = None
         if residual_headline_after_low is not None:
             remaining_ng_to_quote = max(residual_headline_after_low - sum_habitat_residuals, 0.0)
 
+        # Combined residual headline table (add NG remainder row only if >0)
         combined_residual = residual_table.copy()
         if remaining_ng_to_quote is not None and remaining_ng_to_quote > 1e-9:
             combined_residual = pd.concat([
@@ -504,22 +588,13 @@ with tabs[0]:
                 }])
             ], ignore_index=True)
 
-        # KPIs for hero
+        # KPIs
         k_units = round(float(combined_residual["unmet_units_after_on_site_offset"].sum()) if not combined_residual.empty else 0.0, 4)
         k_rows  = len(combined_residual) if not combined_residual.empty else 0
         k_ng    = round(float(remaining_ng_to_quote or 0.0), 4)
 
-        # --- NEW: detect cascade surplus after meeting all deficits + 10% NG ---
-        surplus_by_band = alloc["surplus_remaining_by_band"].copy()
-        applied_low = float(applied_low_to_headline or 0.0)
-        if not surplus_by_band.empty:
-            mask_low = surplus_by_band["band"] == "Low"
-            if mask_low.any():
-                surplus_by_band.loc[mask_low, "surplus_remaining_units"] = (
-                    surplus_by_band.loc[mask_low, "surplus_remaining_units"] - applied_low
-                ).clip(lower=0)
+        # Overall surplus after everything?
         overall_surplus_after_all = float(surplus_by_band["surplus_remaining_units"].sum()) if not surplus_by_band.empty else 0.0
-
         overflow_happened = (
             (combined_residual.empty or
              (len(combined_residual) == 1 and combined_residual["distinctiveness"].iloc[0] == "Net Gain" and
@@ -528,14 +603,36 @@ with tabs[0]:
             and (overall_surplus_after_all > 1e-9)
         )
 
-        # ---- HERO CARD ----
+        # ---------- EXPLAINER (maths in words) ----------
+        explain_md = build_area_explanation(
+            alloc=alloc,
+            headline_def=headline_def,
+            low_available=float(low_remaining),
+            applied_low_to_headline=applied_low_to_headline,
+            residual_headline_after_low=residual_headline_after_low,
+            remaining_ng_to_quote=remaining_ng_to_quote,
+            ng_flow_rows=ng_flow_rows
+        )
+        st.markdown(
+            '<div class="explain-card"><h4>What this app just did (in plain English)</h4><p>We read the Metric and applied the trading rules; here’s exactly how units moved:</p>'
+            + explain_md.replace("\n","<br/>") +
+            f'<p class="explain-kv">Key numbers: <code>headline={0.0 if headline_def is None else float(headline_def):.4f}</code>, '
+            f'<code>low_used={float(applied_low_to_headline or 0.0):.4f}</code>, '
+            f'<code>headline_after_low={0.0 if residual_headline_after_low is None else float(residual_headline_after_low):.4f}</code>, '
+            f'<code>habitat_unmet={sum_habitat_residuals:.4f}</code>, '
+            f'<code>ng_remainder={float(remaining_ng_to_quote or 0.0):.4f}</code>'
+            + (f', <code>overall_surplus={overall_surplus_after_all:.4f}</code>' if overflow_happened else '') +
+            "</p></div>",
+            unsafe_allow_html=True
+        )
+
+        # ---------- HERO CARD ----------
         st.markdown('<div class="hero-card">', unsafe_allow_html=True)
         st.markdown(
             '<div class="hero-title">🧮 Still needs mitigation OFF-SITE (after offsets + Low→Headline)</div>'
             '<div class="hero-sub">This is what you need to source or quote for.</div>',
             unsafe_allow_html=True
         )
-
         c1, c2, c3 = st.columns(3)
         with c1:
             st.markdown('<div class="kpi"><div class="label">Total units to mitigate</div>'
@@ -547,35 +644,22 @@ with tabs[0]:
             st.markdown('<div class="kpi"><div class="label">NG remainder (10%)</div>'
                         f'<div class="value">{k_ng}</div></div>', unsafe_allow_html=True)
 
-        # SURPLUS FLAG (if applicable)
         if overflow_happened:
             st.success("🎉 **Overall surplus after meeting all Area + 10% Net Gain**")
-            st.write(pd.DataFrame([
-                {"surplus_units_total": round(overall_surplus_after_all, 4)}
-            ]))
+            st.write(pd.DataFrame([{"surplus_units_total": round(overall_surplus_after_all, 4)}]))
             st.write(
                 surplus_by_band.rename(columns={
                     "band": "distinctiveness_band",
                     "surplus_remaining_units": "surplus_units_after_allocation_and_NG"
                 })
             )
-        # --- One-line, always-visible total overall surplus (only when it actually exists) ---
-        if overflow_happened:
-            total_overall_surplus_row = pd.DataFrame([{
-                "label": "Total overall surplus (after all allocations & 10% NG)",
-                "units": round(overall_surplus_after_all, 4)
-            }])
-            st.write(total_overall_surplus_row)
-            # keep for exports
             st.session_state["total_overall_surplus_area"] = float(round(overall_surplus_after_all, 4))
         else:
+            st.info("No overall surplus remaining after meeting habitat deficits and 10% Net Gain.")
             st.session_state["total_overall_surplus_area"] = 0.0
 
-        
-        # Headline table
         st.dataframe(combined_residual, use_container_width=True, height=260)
 
-        # Downloads
         cdl1, cdl2, _ = st.columns([1,1,3])
         with cdl1:
             st.download_button("⬇️ Download CSV",
@@ -585,21 +669,30 @@ with tabs[0]:
             st.download_button("⬇️ Download JSON",
                 combined_residual.to_json(orient="records", indent=2).encode("utf-8"),
                 "area_residual_offsite_incl_ng_remainder.json", "application/json")
-        st.markdown('</div>', unsafe_allow_html=True)  # end hero-card
+        st.markdown('</div>', unsafe_allow_html=True)
 
-        # Save for exports
+        # Save for Exports
         st.session_state["combined_residual_area"] = combined_residual
 
-        # ---- Expanders ----
-        with st.expander("🔎 Headline calculation details", expanded=False):
-            st.markdown('<span class="exp-label">Low → Headline & remainder</span>', unsafe_allow_html=True)
-            st.write(pd.DataFrame([{
-                "headline_area_unit_deficit": headline_def,
-                "low_band_surplus_applied_to_headline": None if applied_low_to_headline is None else round(applied_low_to_headline, 4),
-                "residual_headline_after_low": None if residual_headline_after_low is None else round(residual_headline_after_low, 4),
-                "sum_habitat_residuals": round(sum_habitat_residuals, 4),
-                "remaining_net_gain_to_quote": None if remaining_ng_to_quote is None else round(remaining_ng_to_quote, 4),
-            }]))
+        # ---------- Expanders ----------
+        with st.expander("🔗 Eligibility matrix (mitigation flows — includes Low→Headline)", expanded=False):
+            if flows_matrix.empty:
+                st.info("No flows recorded.")
+            else:
+                show = flows_matrix.rename(columns={
+                    "deficit_habitat":"deficit",
+                    "deficit_broad":"deficit_broad_group",
+                    "deficit_band":"deficit_distinctiveness",
+                    "surplus_habitat":"source_surplus",
+                    "surplus_broad":"source_broad_group",
+                    "surplus_band":"source_distinctiveness",
+                    "units_transferred":"units",
+                    "flow_type":"flow_type"
+                })
+                st.dataframe(show, use_container_width=True, height=380)
+
+        with st.expander("🧮 Surplus remaining by band (after all on-site offsets & Low→Headline)", expanded=False):
+            st.dataframe(surplus_by_band, use_container_width=True, height=220)
 
         with st.expander("📉 Deficits (project-wide change < 0)", expanded=False):
             if alloc["deficits"].empty:
@@ -615,21 +708,10 @@ with tabs[0]:
                 st.dataframe(alloc["surpluses"][["habitat","broad_group","distinctiveness","project_wide_change"]],
                              use_container_width=True, height=300)
 
-        with st.expander("🔗 Eligibility matrix (your trading rules)", expanded=False):
-            if alloc["eligibility"].empty:
-                st.info("No eligible offsets.")
-            else:
-                st.dataframe(alloc["eligibility"], use_container_width=True, height=360)
-
-        with st.expander("🧮 Surplus remaining by band (after on-site offsets)", expanded=False):
-            st.dataframe(alloc["surplus_remaining_by_band"], use_container_width=True, height=220)
-
         with st.expander("📋 Normalised input table (Area Habitats)", expanded=False):
             st.dataframe(area_norm, use_container_width=True, height=420)
 
-# -----------------------------------
-# Hedgerows
-# -----------------------------------
+# ---------- HEDGEROWS ----------
 with tabs[1]:
     st.subheader("Hedgerows")
     if hedge_norm.empty:
@@ -639,9 +721,7 @@ with tabs[1]:
             st.caption(f"Source sheet: `{hedge_sheet or 'not found'}`")
             st.dataframe(hedge_norm, use_container_width=True, height=480)
 
-# -----------------------------------
-# Watercourses
-# -----------------------------------
+# ---------- WATERCOURSES ----------
 with tabs[2]:
     st.subheader("Watercourses")
     if water_norm.empty:
@@ -651,9 +731,7 @@ with tabs[2]:
             st.caption(f"Source sheet: `{water_sheet or 'not found'}`")
             st.dataframe(water_norm, use_container_width=True, height=480)
 
-# -----------------------------------
-# Exports
-# -----------------------------------
+# ---------- EXPORTS ----------
 with tabs[3]:
     st.subheader("Exports")
     norm_concat = pd.concat(
@@ -699,7 +777,22 @@ with tabs[3]:
                                    combined_residual_area.to_json(orient="records", indent=2).encode("utf-8"),
                                    "area_residual_to_mitigate_incl_ng_remainder.json", "application/json")
 
-st.caption("Tip: The headline card is the number you quote. Everything else sits below for audit/QA.")
+        # Optional: export overall surplus number if any
+        surplus_num = st.session_state.get("total_overall_surplus_area", 0.0)
+        if surplus_num and surplus_num > 0:
+            surplus_df = pd.DataFrame([{
+                "category": "Area Habitats",
+                "total_overall_surplus_units": float(surplus_num)
+            }])
+            st.download_button(
+                "⬇️ Download overall surplus (Area) — JSON",
+                surplus_df.to_json(orient="records", indent=2).encode("utf-8"),
+                "overall_surplus_area.json",
+                "application/json"
+            )
+
+st.caption("The headline card is the number you quote. The flows table now also shows Low→Headline coverage, so Net Gain mitigation is fully traceable.")
+
 
 
 
