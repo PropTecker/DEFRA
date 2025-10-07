@@ -837,7 +837,7 @@ with tabs[0]:
             unsafe_allow_html=True
         )
         with st.expander("📊 Sankey — Offsets & Net Gain flows", expanded=False):
-            sankey_fig = build_area_sankey(
+            sankey_fig = build_area_sankey_clean(
                 flows_matrix=flows_matrix,
                 residual_table=residual_table,
                 remaining_ng_to_quote=remaining_ng_to_quote
