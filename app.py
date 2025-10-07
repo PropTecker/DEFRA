@@ -454,6 +454,134 @@ def build_area_explanation(
 
     return "\n".join(lines)
 
+# ---------- Sankey builder ----------
+import plotly.graph_objects as go
+
+def _node_color_for_band(band: str) -> str:
+    # pleasant, colorblind-friendly-ish palette
+    m = {
+        "Very High": "#7b1fa2",  # purple
+        "High": "#d32f2f",       # red
+        "Medium": "#1976d2",     # blue
+        "Low": "#388e3c",        # green
+        "Net Gain": "#455a64",   # blue-grey
+        "Other": "#8d6e63",      # brown
+    }
+    return m.get(str(band), m["Other"])
+
+def build_area_sankey(
+    flows_matrix: pd.DataFrame,
+    residual_table: pd.DataFrame,
+    remaining_ng_to_quote: Optional[float]
+) -> go.Figure:
+    """
+    Build a Sankey from:
+      - flows_matrix: rows from eligibility/flows (includes 'low→headline' rows we added)
+      - residual_table: unmet habitat rows -> Off-site Mitigation
+      - remaining_ng_to_quote: extra edge Headline -> Off-site Mitigation (if > 0)
+    """
+    # 1) normalise & aggregate flows
+    f = flows_matrix.copy()
+    if f.empty:
+        f = pd.DataFrame(columns=[
+            "deficit_habitat","deficit_broad","deficit_band",
+            "surplus_habitat","surplus_broad","surplus_band",
+            "units_transferred","flow_type"
+        ])
+
+    # aggregate identical pairs to keep diagram clean
+    f["units_transferred"] = pd.to_numeric(f["units_transferred"], errors="coerce").fillna(0.0)
+    agg = (
+        f.groupby(
+            ["surplus_habitat","surplus_band","deficit_habitat","deficit_band","flow_type"],
+            dropna=False, as_index=False
+        )["units_transferred"].sum()
+    )
+    agg = agg[agg["units_transferred"] > 0]
+
+    # 2) node list
+    labels = []
+    colors = []
+
+    def add_node(label: str, band: str) -> int:
+        if label not in labels:
+            labels.append(label)
+            colors.append(_node_color_for_band(band))
+        return labels.index(label)
+
+    # Surplus nodes (prefix S:), Deficit nodes (prefix D:)
+    for _, r in agg.iterrows():
+        add_node(f"S: {r['surplus_habitat']}", str(r["surplus_band"]))
+        # deficit can be a real habitat or "Net Gain uplift (Headline)" (from our low→headline rows)
+        d_band = str(r["deficit_band"])
+        add_node(f"D: {r['deficit_habitat']}", d_band)
+
+    # Extra sink node
+    offsite_node = add_node("Off-site mitigation (to source)", "Other")
+    # Headline node may already exist from low→headline; ensure it exists if we need to draw NG remainder
+    headline_node = None
+    if ("Net gain uplift (Headline)" in [d.replace("D: ","") for d in labels]):
+        headline_node = labels.index("D: Net gain uplift (Headline)")
+    else:
+        # only create explicitly if we need to show NG remainder
+        if remaining_ng_to_quote and remaining_ng_to_quote > 1e-9:
+            headline_node = add_node("D: Net gain uplift (Headline)", "Net Gain")
+
+    # 3) links from surplus -> deficit (habitat or Headline)
+    sources, targets, values, link_colors = [], [], [], []
+    for _, r in agg.iterrows():
+        s_idx = labels.index(f"S: {r['surplus_habitat']}")
+        d_idx = labels.index(f"D: {r['deficit_habitat']}")
+        sources.append(s_idx)
+        targets.append(d_idx)
+        values.append(float(r["units_transferred"]))
+        # color by source band with some transparency
+        link_colors.append(_node_color_for_band(str(r["surplus_band"])) + "90")  # add alpha
+
+    # 4) residual habitat -> Off-site
+    if residual_table is not None and not residual_table.empty:
+        for _, row in residual_table.iterrows():
+            d_lab = f"D: {row['habitat']}"
+            if d_lab not in labels:
+                add_node(d_lab, str(row.get("distinctiveness","Other")))
+            d_idx = labels.index(d_lab)
+            sources.append(d_idx)
+            targets.append(offsite_node)
+            values.append(float(row["unmet_units_after_on_site_offset"]))
+            link_colors.append("#9e9e9e99")  # neutral
+
+    # 5) NG remainder -> Off-site
+    if remaining_ng_to_quote and remaining_ng_to_quote > 1e-9:
+        if headline_node is None:
+            headline_node = add_node("D: Net gain uplift (Headline)", "Net Gain")
+        sources.append(headline_node)
+        targets.append(offsite_node)
+        values.append(float(remaining_ng_to_quote))
+        link_colors.append(_node_color_for_band("Net Gain") + "99")
+
+    # 6) build figure
+    fig = go.Figure(data=[go.Sankey(
+        arrangement="snap",
+        node=dict(
+            pad=15, thickness=20,
+            line=dict(width=0.5, color="rgba(120,120,120,0.3)"),
+            label=labels,
+            color=colors
+        ),
+        link=dict(
+            source=sources, target=targets, value=values,
+            color=link_colors
+        )
+    )])
+    fig.update_layout(
+        margin=dict(l=10, r=10, t=10, b=10),
+        height=520
+    )
+    return fig
+
+
+
+
 # ---------------- UI ----------------
 st.title("🌿 DEFRA BNG Metric Reader")
 
@@ -625,7 +753,15 @@ with tabs[0]:
             "</p></div>",
             unsafe_allow_html=True
         )
+        with st.expander("📊 Sankey — Offsets & Net Gain flows", expanded=False):
+            sankey_fig = build_area_sankey(
+                flows_matrix=flows_matrix,
+                residual_table=residual_table,
+                remaining_ng_to_quote=remaining_ng_to_quote
+            )
+            st.plotly_chart(sankey_fig, use_container_width=True, theme="streamlit")
 
+        
         # ---------- HERO CARD ----------
         st.markdown('<div class="hero-card">', unsafe_allow_html=True)
         st.markdown(
