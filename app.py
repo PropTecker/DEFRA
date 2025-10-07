@@ -1,23 +1,10 @@
-# app.py — DEFRA BNG Metric Reader
-# -----------------------------------------------------------
-# What this does
-# - Upload a DEFRA BNG Metric (.xlsx)
-# - Parse Trading Summary tabs for: Area Habitats, Hedgerows, Watercourses
-# - Normalise key fields for your optimiser
-# - For Area Habitats ONLY, apply your trading rules:
-#     • Very High: same habitat only
-#     • High:      same habitat only
-#     • Medium:    SAME Broad Group (Cropland/Grassland/etc.) AND distinctiveness ≥ Medium
-#     • Low:       same or better (≥); any remaining Low surplus applied to Headline Area Unit Deficit
-# - Compute the “Still needs mitigation OFF-SITE” list INCLUDING:
-#     • Any unmet habitat-level deficits
-#     • PLUS the Net Gain remainder row:
-#           (Headline Area Unit Deficit after Low) − (sum of habitat residuals)
-# - Export normalised requirements + residuals for quoting.
-#
-# Notes
-# - Broad Group is taken from the cell immediately to the RIGHT of the Habitat column,
-#   with checks to avoid numeric columns.
+# app.py — DEFRA BNG Metric Reader (robust distinctiveness tagging incl. B11)
+# ---------------------------------------------------------------------------
+# Key features unchanged (reader, Area rules, NG remainder). This version improves
+# distinctiveness tagging so section headers in column B (e.g., B11) are picked up:
+# - Scan first 6 columns per row with regex (handles merged cells / spacing).
+# - Prioritise 'Very High' over 'High'.
+# - Forward-fill the active band onto subsequent habitat rows.
 
 import re
 from typing import Dict, List, Optional, Tuple
@@ -57,7 +44,7 @@ def find_sheet(xls: pd.ExcelFile, targets: List[str]) -> Optional[str]:
             return s
     return None
 
-def find_header_row(df: pd.DataFrame, within_rows: int = 60) -> Optional[int]:
+def find_header_row(df: pd.DataFrame, within_rows: int = 80) -> Optional[int]:
     """Find header row for Trading Summary tables (has group + on/off/project wording)."""
     for i in range(min(within_rows, len(df))):
         row = [clean_text(x) for x in df.iloc[i].tolist()]
@@ -90,25 +77,53 @@ def col_like(df: pd.DataFrame, *cands: str) -> Optional[str]:
             return v
     return None
 
+# ------------------------------
+# Robust distinctiveness tagging (handles B11 headings)
+# ------------------------------
+VH_PAT = re.compile(r"\bvery\s*high\b.*distinct", re.I)
+H_PAT  = re.compile(r"\b(?<!very\s)high\b.*distinct", re.I)  # ensure we don't match 'very high' as 'high'
+M_PAT  = re.compile(r"\bmedium\b.*distinct", re.I)
+L_PAT  = re.compile(r"\blow\b.*distinct", re.I)
+
 def tag_distinctiveness(df: pd.DataFrame, habitat_col: str) -> pd.DataFrame:
-    """Tag rows with distinctiveness band by scanning section headers."""
+    """
+    Tag rows with distinctiveness band by scanning up to the first 6 columns for
+    headings like 'Very High Distinctiveness', 'High Distinctiveness', etc.
+    We forward-fill the most recent band onto subsequent rows until the next heading.
+    """
     out = df.copy()
     out["__distinctiveness__"] = pd.NA
-    band = None
-    for idx, row in out.iterrows():
-        joined = " ".join([clean_text(x) for x in row.tolist() if isinstance(x, str)]).lower()
-        if "very high distinctiveness" in joined:
-            band = "Very High"
-        elif "high distinctiveness" in joined and "very" not in joined:
-            band = "High"
-        elif "medium distinctiveness" in joined:
-            band = "Medium"
-        elif "low distinctiveness" in joined:
-            band = "Low"
-        if band and isinstance(row.get(habitat_col, ""), str) and clean_text(row.get(habitat_col, "")) != "":
-            out.loc[idx, "__distinctiveness__"] = band
+    active_band = None
+
+    # We will NOT depend on which column the heading is in (B11 etc.)
+    # Scan first 6 columns to catch headings in A..F
+    max_scan_cols = min(6, out.shape[1])
+    scan_cols = list(out.columns[:max_scan_cols])
+
+    for idx in range(len(out)):
+        row_texts = [clean_text(out.at[idx, c]) for c in scan_cols if c in out.columns]
+        joined = " ".join([t for t in row_texts if isinstance(t, str)]).strip()
+
+        if joined:
+            # Prioritise Very High before High
+            if VH_PAT.search(joined):
+                active_band = "Very High"
+            elif H_PAT.search(joined):
+                active_band = "High"
+            elif M_PAT.search(joined):
+                active_band = "Medium"
+            elif L_PAT.search(joined):
+                active_band = "Low"
+
+        # Forward-fill onto this row (even if habitat is blank; we'll filter later)
+        if active_band:
+            out.at[idx, "__distinctiveness__"] = active_band
+
     return out
 
+# ------------------------------
+# Broad Group resolution (right of Habitat)
+# ------------------------------
 def resolve_broad_group_col(df: pd.DataFrame, habitat_col: str, broad_col_guess: Optional[str]) -> Optional[str]:
     """
     Prefer the column immediately to the RIGHT of the habitat column.
@@ -127,25 +142,19 @@ def resolve_broad_group_col(df: pd.DataFrame, habitat_col: str, broad_col_guess:
         name = canon(col)
         if any(k in name for k in ["group", "broad_habitat"]):
             return True
-        ser = df[col]
-        nn = ser.dropna()
-        if nn.empty:
+        ser = df[col].dropna()
+        if ser.empty:
             return False
-        numeric_ratio = pd.to_numeric(nn, errors="coerce").notna().mean()
-        return numeric_ratio < 0.2  # mostly text → likely group label
+        # If mostly text, likely a group label
+        numeric_ratio = pd.to_numeric(ser, errors="coerce").notna().mean()
+        return numeric_ratio < 0.2
 
-    # Prefer adjacent if it looks like a group and not a unit change col
     if adj and looks_like_group(adj) and "unit_change" not in canon(adj):
         return adj
-
-    # Else, try guess if it looks like a group
     if broad_col_guess and looks_like_group(broad_col_guess):
         return broad_col_guess
-
-    # Last resort: if adjacent isn't clearly a unit-change col, accept it
     if adj and "unit_change" not in canon(adj):
         return adj
-
     return broad_col_guess
 
 # ------------------------------
@@ -180,7 +189,7 @@ def normalise_requirements(
     # Resolve Broad Group from the cell to the RIGHT of Habitat (with safeguards)
     broad_col = resolve_broad_group_col(df, habitat_col, broad_col_guess)
 
-    # Tag distinctiveness by scanning section headers
+    # Distinctiveness tagging (robust)
     df = tag_distinctiveness(df, habitat_col)
 
     # Keep only habitat rows
@@ -330,7 +339,7 @@ def parse_headline_area_deficit(xls: pd.ExcelFile) -> Optional[float]:
 
     # Try to find a header row with "Unit Deficit"
     header_row = None
-    for i in range(min(60, len(hr))):
+    for i in range(min(80, len(hr))):
         row = " ".join([clean_text(x) for x in hr.iloc[i].tolist()]).lower()
         if "unit deficit" in row:
             header_row = i
@@ -563,4 +572,5 @@ with tabs[3]:
                                data=residual_json, file_name="area_residual_to_mitigate_incl_ng_remainder.json", mime="application/json")
 
 st.caption("Tip: If your internal headers differ, we can add a small 'column mapper' to lock to your template.")
+
 
