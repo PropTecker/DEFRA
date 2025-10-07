@@ -1,20 +1,11 @@
-# app.py — DEFRA BNG Metric Reader (with Area Habitats trading logic)
-# -----------------------------------------
-# Features
-# - Upload DEFRA BNG Metric .xlsx
-# - Parse "Trading Summary" sheets (Area Habitats, Hedgerows, Watercourses)
-# - Normalised "requirements" export for optimiser
-# - Area Habitats: apply user-specified trading rules:
-#     Very High  -> same habitat only (bespoke/same)
-#     High       -> same habitat only
-#     Medium     -> same broad habitat GROUP, and distinctiveness >= Medium
-#     Low        -> same or better (>=); remaining Low surplus offsets Headline Area Unit Deficit
-# - Show deficits, surpluses, eligibility matrix, residual off-site, and headline Low application
+# app.py — DEFRA BNG Metric Reader (with Area Habitats trading logic + Headline residual row)
+# ------------------------------------------------------------------------------------------------
+# What’s new:
+# - After we apply remaining Low-band surplus to the Headline Area Unit Deficit,
+#   any residual Headline deficit is appended as an extra row in the
+#   "Still needs mitigation OFF-SITE (after offsets + Low→Headline)" table.
 #
-# Notes
-# - Hedgerows & Watercourses: provided as normalised requirements only (no bespoke trading rules given).
-# - Robust header detection + distinctiveness section parsing.
-# - Exports CSV/JSON for both normalised requirements and residual off-site (Area Habitats).
+# Everything else as before (reader + Area rules).
 
 import io
 import re
@@ -191,8 +182,7 @@ def can_offset_area(d_band: str, d_broad: str, d_hab: str,
     return False
 
 def apply_area_offsets(area_df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
-    """Consume eligible on-site surpluses to cover deficits. Then apply remaining Low surplus to Headline deficit."""
-    # Separate deficits/surpluses by project_wide_change
+    """Consume eligible on-site surpluses to cover deficits."""
     data = area_df.copy()
     data["project_wide_change"] = coerce_num(data["project_wide_change"])
     deficits = data[data["project_wide_change"] < 0].copy()
@@ -217,7 +207,7 @@ def apply_area_offsets(area_df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
                 })
     elig_df = pd.DataFrame(elig_rows)
 
-    # Greedy allocation: consume surpluses to cover deficits
+    # Greedy allocation
     band_rank = {"Low": 1, "Medium": 2, "High": 3, "Very High": 4}
     sur = surpluses.copy()
     sur["__remain__"] = sur["project_wide_change"].astype(float)
@@ -229,13 +219,10 @@ def apply_area_offsets(area_df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
         d_broad = d.get("broad_group", "")
         d_hab = d.get("habitat", "")
 
-        # Eligible surplus indices
         elig_idx = [si for si, s in sur.iterrows()
                     if can_offset_area(d_band, d_broad, d_hab, str(s["distinctiveness"]),
                                        s.get("broad_group",""), s.get("habitat",""))
                     and sur.loc[si, "__remain__"] > 0]
-
-        # Sort by distinctiveness high→low, then by size desc
         elig_idx = sorted(
             elig_idx,
             key=lambda sidx: (-band_rank.get(str(sur.loc[sidx, "distinctiveness"]), 0), -sur.loc[sidx, "__remain__"])
@@ -257,13 +244,11 @@ def apply_area_offsets(area_df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
                 "unmet_units_after_on_site_offset": round(need, 4)
             })
 
-    # Table: surplus remaining by band (used later for Low → Headline)
     surplus_remaining_by_band = sur.groupby("distinctiveness", dropna=False)["__remain__"].sum().reset_index()
     surplus_remaining_by_band = surplus_remaining_by_band.rename(columns={"distinctiveness": "band",
                                                                           "__remain__": "surplus_remaining_units"})
 
-    # Return all useful pieces
-    res = {
+    return {
         "deficits": deficits.sort_values("project_wide_change"),
         "surpluses": surpluses.sort_values("project_wide_change", ascending=False),
         "eligibility": elig_df,
@@ -273,7 +258,6 @@ def apply_area_offsets(area_df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
             ascending=[False, False]
         ).reset_index(drop=True)
     }
-    return res
 
 # ------------------------------
 # Headline Results parsing (for Area Habitat units)
@@ -320,7 +304,7 @@ st.caption("Upload a DEFRA BNG Metric workbook (.xlsx). Extract normalised requi
 with st.sidebar:
     file = st.file_uploader("Upload DEFRA BNG Metric (.xlsx)", type=["xlsx"])
     st.markdown("---")
-    st.markdown("**Rules applied (Area Habitats):**\n"
+    st.markdown("**Rules (Area Habitats):**\n"
                 "- Very High: same habitat only\n"
                 "- High: same habitat only\n"
                 "- Medium: same **broad habitat group**; distinctiveness ≥ Medium\n"
@@ -421,16 +405,30 @@ with tabs[0]:
             "residual_headline_area_unit_deficit": None if residual_headline is None else round(residual_headline, 4),
         }]))
 
+        # Build combined residual table: unmet habitat-level + residual Headline NG deficit
+        combined_residual = alloc["residual_off_site"].copy()
+        if residual_headline is not None and residual_headline > 1e-9:
+            headline_row = pd.DataFrame([{
+                "habitat": "Net gain uplift (Area, +10% over baseline)",
+                "broad_group": "—",
+                "distinctiveness": "Net Gain",
+                "unmet_units_after_on_site_offset": round(float(residual_headline), 4)
+            }])
+            combined_residual = pd.concat([combined_residual, headline_row], ignore_index=True)
+
         st.markdown("**Still needs mitigation OFF-SITE (after offsets + Low→Headline)**")
-        if alloc["residual_off_site"].empty:
-            st.success("No unmet habitat-level deficits after on-site offsets.")
+        if combined_residual.empty:
+            st.success("No unmet units after on-site offsets and Low→Headline application.")
         else:
-            st.dataframe(alloc["residual_off_site"], use_container_width=True, height=240)
+            st.dataframe(combined_residual, use_container_width=True, height=260)
+
+        # Keep for export tab
+        st.session_state["combined_residual_area"] = combined_residual
 
         # Downloads for Area residuals
-        residual_area_csv = alloc["residual_off_site"].to_csv(index=False).encode("utf-8")
-        st.download_button("Download residual off-site (Area Habitats) — CSV",
-                           residual_area_csv, "area_residual_offsite.csv", "text/csv")
+        residual_area_csv = combined_residual.to_csv(index=False).encode("utf-8")
+        st.download_button("Download residual off-site (Area Habitats incl. Headline) — CSV",
+                           residual_area_csv, "area_residual_offsite_incl_headline.csv", "text/csv")
 
 # ---- Hedgerows (normalised only)
 with tabs[1]:
@@ -454,7 +452,7 @@ with tabs[2]:
 with tabs[3]:
     st.subheader("Exports")
 
-    # Normalised "requirements" style export (one table across all three)
+    # Normalised "requirements" export across all three
     norm_concat = pd.concat(
         [df for df in [area_norm, hedge_norm, water_norm] if not df.empty],
         ignore_index=True
@@ -466,7 +464,6 @@ with tabs[3]:
         st.info("No normalised rows to export.")
     else:
         st.dataframe(norm_concat, use_container_width=True, height=420)
-        # Provide clean "requirements" export (positive numbers for required off-site only)
         req_export = norm_concat.copy()
         req_export["required_offsite_units"] = req_export["project_wide_change"].apply(
             lambda x: abs(x) if pd.notna(x) and x < 0 else 0
@@ -481,17 +478,15 @@ with tabs[3]:
         st.download_button("Download normalised requirements — JSON",
                            data=json_bytes, file_name="requirements_export.json", mime="application/json")
 
-        # Residual-to-mitigate: only Area has rule-based allocation here
-        # (You can extend the same pattern to Hedgerows/Watercourses if you define rules)
-        # We’ll export the Area residual off-site table again here for convenience
-        if "residual_off_site" in locals():
-            residual_area = locals()["alloc"]["residual_off_site"]  # from Area tab calc
-            residual_csv = residual_area.to_csv(index=False).encode("utf-8")
-            residual_json = residual_area.to_json(orient="records", indent=2).encode("utf-8")
-            st.download_button("Download residual to mitigate (Area) — CSV",
-                               data=residual_csv, file_name="area_residual_to_mitigate.csv", mime="text/csv")
-            st.download_button("Download residual to mitigate (Area) — JSON",
-                               data=residual_json, file_name="area_residual_to_mitigate.json", mime="application/json")
+        # Residual-to-mitigate (Area) INCLUDING the appended Headline row
+        combined_residual_area = st.session_state.get("combined_residual_area", pd.DataFrame())
+        if not combined_residual_area.empty:
+            residual_csv = combined_residual_area.to_csv(index=False).encode("utf-8")
+            residual_json = combined_residual_area.to_json(orient="records", indent=2).encode("utf-8")
+            st.download_button("Download residual to mitigate (Area incl. Headline) — CSV",
+                               data=residual_csv, file_name="area_residual_to_mitigate_incl_headline.csv", mime="text/csv")
+            st.download_button("Download residual to mitigate (Area incl. Headline) — JSON",
+                               data=residual_json, file_name="area_residual_to_mitigate_incl_headline.json", mime="application/json")
 
 st.caption("Tip: If your internal headers differ, we can add a small 'column mapper' to lock to your template.")
 
