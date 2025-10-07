@@ -1,9 +1,10 @@
-# app.py — DEFRA BNG Metric Reader
+# app.py — DEFRA BNG Metric Reader (Styled)
 # - Supports .xlsx / .xlsm / .xlsb (no macros run)
-# - Robust Headline Results parser (Unit Type table; fallback: derive from baseline/post)
-# - Distinctiveness from raw (detects section headers like "Very High Distinctiveness" in B11)
+# - Robust Headline Results parser
+# - Distinctiveness from raw (captures "Very High Distinctiveness" etc.)
 # - Broad Group from the cell to the right of Habitat
-# - Area trading rules + Low→Headline + Net Gain remainder to quote
+# - Area trading rules + Low→Headline + Net Gain remainder
+# - ✨ Pretty UI: headline hero card + KPIs; other sections inside expanders
 
 import io
 import os
@@ -16,7 +17,60 @@ import streamlit as st
 st.set_page_config(page_title="DEFRA BNG Metric Reader", page_icon="🌿", layout="wide")
 
 # ------------------------------
-# File opening (xlsx / xlsm / xlsb) — macros are NOT executed
+# Global CSS (subtle, theme-aware)
+# ------------------------------
+st.markdown(
+    """
+    <style>
+      /* Base polish */
+      .stApp { background: radial-gradient(1200px 600px at 0% -10%, rgba(120,200,160,.08), transparent),
+                           radial-gradient(1200px 600px at 100% 110%, rgba(120,160,220,.08), transparent); }
+      .block-container { padding-top: 2rem; padding-bottom: 2.5rem; }
+
+      /* Headline "card" */
+      .hero-card {
+        border-radius: 20px;
+        padding: 1.2rem 1.2rem 1rem;
+        margin: .2rem 0 1rem;
+        background: var(--hero-bg, rgba(250,250,250,0.65));
+        backdrop-filter: blur(8px);
+        border: 1px solid rgba(120,120,120,0.12);
+        box-shadow: 0 6px 22px rgba(0,0,0,.08);
+      }
+      @media (prefers-color-scheme: dark) {
+        .hero-card { --hero-bg: rgba(22,22,22,0.55); border-color: rgba(255,255,255,0.08); }
+      }
+      .hero-title {
+        font-weight: 700; font-size: 1.15rem; margin: 0 0 .25rem 0;
+        display: flex; align-items: center; gap: .5rem;
+      }
+      .hero-sub { opacity: .75; font-size: .92rem; margin-top: 0; }
+
+      /* KPI chips */
+      .kpi {
+        display: grid; gap: .3rem;
+        padding: .8rem 1rem; border-radius: 14px;
+        border: 1px solid rgba(120,120,120,0.12);
+        background: rgba(180,180,180,0.06);
+      }
+      .kpi .label { opacity: .75; font-size: .8rem; }
+      .kpi .value { font-weight: 700; font-size: 1.2rem; }
+
+      /* Button row inside hero */
+      .btn-row { display:flex; flex-wrap:wrap; gap:.6rem; align-items:center; }
+
+      /* Section headers inside expanders */
+      .exp-label { font-weight: 700; font-size: .98rem; }
+
+      /* Make dataframes a bit tighter */
+      div[data-testid="stDataFrame"] { border-radius: 14px; overflow: hidden; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+# ------------------------------
+# Loading macro-enabled workbooks (no macros executed)
 # ------------------------------
 def open_metric_workbook(uploaded_file) -> pd.ExcelFile:
     """
@@ -49,7 +103,7 @@ def open_metric_workbook(uploaded_file) -> pd.ExcelFile:
     raise RuntimeError("Could not open workbook. Try re-saving as .xlsx or .xlsm.")
 
 # ------------------------------
-# Generic utils
+# Utils
 # ------------------------------
 def clean_text(x) -> str:
     if x is None or (isinstance(x, float) and pd.isna(x)):
@@ -152,7 +206,7 @@ def resolve_broad_group_col(df: pd.DataFrame, habitat_col: str, broad_col_guess:
     return broad_col_guess
 
 # ------------------------------
-# Distinctiveness tagging from RAW (captures section headers like B11)
+# Distinctiveness tagging from RAW (captures section headers)
 # ------------------------------
 VH_PAT = re.compile(r"\bvery\s*high\b.*distinct", re.I)
 H_PAT  = re.compile(r"\bhigh\b.*distinct", re.I)
@@ -278,7 +332,7 @@ def can_offset_area(d_band: str, d_broad: str, d_hab: str,
 
     if d_band == "Very High": return d_hab == s_hab  # exact habitat only
     if d_band == "High":      return d_hab == s_hab  # exact habitat only
-    if d_band == "Medium":    return (d_broad != "" and d_broad == s_broad) and (rs >= rd)  # same group, >=
+    if d_band == "Medium":    return (d_broad != "" and d_broad == s_broad) and (rs >= rd)  # same group, ≥
     if d_band == "Low":       return rs >= rd
     return False
 
@@ -348,7 +402,7 @@ def apply_area_offsets(area_df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
     return {
         "deficits": deficits.sort_values("project_wide_change"),
         "surpluses": surpluses.sort_values("project_wide_change", ascending=False),
-        "eligibility": elig_df,
+        "eligibility": pd.DataFrame(elig_rows),
         "surplus_remaining_by_band": surplus_remaining_by_band,
         "residual_off_site": pd.DataFrame(remaining_records).sort_values(
             ["distinctiveness", "unmet_units_after_on_site_offset"],
@@ -358,7 +412,6 @@ def apply_area_offsets(area_df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
 
 # ------------------------------
 # Headline Results — Area habitat units → Unit Deficit
-# (strict to the Headline Results tab; fallback derive if needed)
 # ------------------------------
 def parse_headline_area_deficit(xls: pd.ExcelFile) -> Optional[float]:
     """
@@ -468,7 +521,6 @@ def parse_headline_area_deficit(xls: pd.ExcelFile) -> Optional[float]:
 # UI
 # ------------------------------
 st.title("🌿 DEFRA BNG Metric Reader")
-st.caption("Upload a DEFRA BNG Metric workbook. For Area Habitats, applies distinctiveness trading rules and uses remaining Low surplus to reduce the Headline Area Unit Deficit; adds the Net Gain remainder row to quote.")
 
 with st.sidebar:
     file = st.file_uploader("Upload DEFRA BNG Metric (.xlsx / .xlsm / .xlsb)", type=["xlsx", "xlsm", "xlsb"])
@@ -492,7 +544,6 @@ except Exception as e:
 st.success("Workbook loaded.")
 st.write("**Sheets detected:**", xls.sheet_names)
 
-# Candidate Trading Summary sheet names
 AREA_SHEETS = [
     "Trading Summary Area Habitats",
     "Area Habitats Trading Summary",
@@ -518,48 +569,19 @@ water_norm, water_map, water_sheet = normalise_requirements(xls, WATER_SHEETS, "
 
 tabs = st.tabs(["Area Habitats", "Hedgerows", "Watercourses", "Exports"])
 
-# ---- Area Habitats tab (with trading rules + NG remainder)
+# ---- Area Habitats tab (headline hero + expanders)
 with tabs[0]:
     st.subheader("Trading Summary — Area Habitats")
     if area_norm.empty:
         st.warning("No Area Habitats trading summary detected.")
     else:
         st.caption(f"Source sheet: `{area_sheet or 'not found'}`")
-        st.dataframe(area_norm, use_container_width=True, height=420)
 
         # Apply trading rules + allocations
         alloc = apply_area_offsets(area_norm)
 
-        col1, col2 = st.columns(2)
-        with col1:
-            st.markdown("**Deficits (project-wide change < 0)**")
-            if alloc["deficits"].empty:
-                st.info("No deficits.")
-            else:
-                st.dataframe(alloc["deficits"][["habitat", "broad_group", "distinctiveness", "project_wide_change"]],
-                             use_container_width=True, height=260)
-
-            st.markdown("**Surpluses (project-wide change > 0)**")
-            if alloc["surpluses"].empty:
-                st.info("No surpluses.")
-            else:
-                st.dataframe(alloc["surpluses"][["habitat", "broad_group", "distinctiveness", "project_wide_change"]],
-                             use_container_width=True, height=260)
-
-        with col2:
-            st.markdown("**Eligibility matrix (your rules)**")
-            if alloc["eligibility"].empty:
-                st.info("No eligible offsets.")
-            else:
-                st.dataframe(alloc["eligibility"], use_container_width=True, height=300)
-
-            st.markdown("**Surplus remaining by band (after on-site offsets)**")
-            st.dataframe(alloc["surplus_remaining_by_band"], use_container_width=True, height=160)
-
-        # Headline Area deficit
+        # Headline Area deficit & Low→Headline
         headline_def = parse_headline_area_deficit(xls)
-
-        # Apply remaining Low surplus to Headline Area Unit Deficit
         low_remaining = float(
             alloc["surplus_remaining_by_band"].loc[
                 alloc["surplus_remaining_by_band"]["band"] == "Low", "surplus_remaining_units"
@@ -568,26 +590,16 @@ with tabs[0]:
         applied_low_to_headline = min(headline_def, low_remaining) if headline_def is not None else None
         residual_headline_after_low = (headline_def - applied_low_to_headline) if headline_def is not None else None
 
-        # Sum of habitat-level residuals (still off-site)
+        # Habitat-level residuals
         residual_table = alloc["residual_off_site"].copy()
         sum_habitat_residuals = float(residual_table["unmet_units_after_on_site_offset"].sum()) if not residual_table.empty else 0.0
 
-        # Remaining Net Gain to quote:
-        # = (Headline Area Unit Deficit after Low) − (sum of habitat residuals)
+        # NG remainder to quote
         remaining_ng_to_quote = None
         if residual_headline_after_low is not None:
             remaining_ng_to_quote = max(residual_headline_after_low - sum_habitat_residuals, 0.0)
 
-        st.markdown("**Headline Results — Low → Headline & remainder calculation**")
-        st.write(pd.DataFrame([{
-            "headline_area_unit_deficit": headline_def,
-            "low_band_surplus_applied_to_headline": None if applied_low_to_headline is None else round(applied_low_to_headline, 4),
-            "residual_headline_after_low": None if residual_headline_after_low is None else round(residual_headline_after_low, 4),
-            "sum_habitat_residuals": round(sum_habitat_residuals, 4),
-            "remaining_net_gain_to_quote": None if remaining_ng_to_quote is None else round(remaining_ng_to_quote, 4),
-        }]))
-
-        # Combined residuals = habitat residuals + ONLY the NG remainder row (if > 0)
+        # Combined residuals table (headline feature)
         combined_residual = residual_table.copy()
         if remaining_ng_to_quote is not None and remaining_ng_to_quote > 1e-9:
             headline_row = pd.DataFrame([{
@@ -598,40 +610,111 @@ with tabs[0]:
             }])
             combined_residual = pd.concat([combined_residual, headline_row], ignore_index=True)
 
-        st.markdown("**Still needs mitigation OFF-SITE (after offsets + Low→Headline)**")
-        if combined_residual.empty:
-            st.success("No unmet units after on-site offsets and Low→Headline application.")
-        else:
-            st.dataframe(combined_residual, use_container_width=True, height=260)
+        # KPIs for hero
+        k_units = round(float(combined_residual["unmet_units_after_on_site_offset"].sum()) if not combined_residual.empty else 0.0, 4)
+        k_rows  = len(combined_residual) if not combined_residual.empty else 0
+        k_ng    = round(float(remaining_ng_to_quote or 0.0), 4)
 
+        # ---- HERO CARD ----
+        st.markdown('<div class="hero-card">', unsafe_allow_html=True)
+        st.markdown(
+            '<div class="hero-title">🧮 Still needs mitigation OFF-SITE (after offsets + Low→Headline)</div>'
+            '<div class="hero-sub">This is what you need to source or quote for.</div>',
+            unsafe_allow_html=True
+        )
+
+        # KPI row
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            st.markdown('<div class="kpi"><div class="label">Total units to mitigate</div>'
+                        f'<div class="value">{k_units}</div></div>', unsafe_allow_html=True)
+        with c2:
+            st.markdown('<div class="kpi"><div class="label">Line items</div>'
+                        f'<div class="value">{k_rows}</div></div>', unsafe_allow_html=True)
+        with c3:
+            st.markdown('<div class="kpi"><div class="label">NG remainder (10%)</div>'
+                        f'<div class="value">{k_ng}</div></div>', unsafe_allow_html=True)
+
+        # The table (front and centre)
+        st.dataframe(combined_residual, use_container_width=True, height=260)
+
+        # Buttons row
+        col_dl1, col_dl2, _ = st.columns([1,1,3])
+        with col_dl1:
+            st.download_button("⬇️ Download CSV",
+                combined_residual.to_csv(index=False).encode("utf-8"),
+                "area_residual_offsite_incl_ng_remainder.csv",
+                "text/csv")
+        with col_dl2:
+            st.download_button("⬇️ Download JSON",
+                combined_residual.to_json(orient="records", indent=2).encode("utf-8"),
+                "area_residual_offsite_incl_ng_remainder.json",
+                "application/json")
+        st.markdown('</div>', unsafe_allow_html=True)  # end hero-card
+
+        # Save for Exports tab
         st.session_state["combined_residual_area"] = combined_residual
 
-        st.download_button("Download residual off-site (Area incl. NG remainder) — CSV",
-                           combined_residual.to_csv(index=False).encode("utf-8"),
-                           "area_residual_offsite_incl_ng_remainder.csv", "text/csv")
+        # ---- Expanders for the rest ----
+        with st.expander("🔎 Headline calculation details", expanded=False):
+            st.markdown('<span class="exp-label">Low → Headline & remainder</span>', unsafe_allow_html=True)
+            st.write(pd.DataFrame([{
+                "headline_area_unit_deficit": headline_def,
+                "low_band_surplus_applied_to_headline": None if applied_low_to_headline is None else round(applied_low_to_headline, 4),
+                "residual_headline_after_low": None if residual_headline_after_low is None else round(residual_headline_after_low, 4),
+                "sum_habitat_residuals": round(sum_habitat_residuals, 4),
+                "remaining_net_gain_to_quote": None if remaining_ng_to_quote is None else round(remaining_ng_to_quote, 4),
+            }]))
 
-# ---- Hedgerows (normalised only)
+        with st.expander("📉 Deficits (project-wide change < 0)", expanded=False):
+            if alloc["deficits"].empty:
+                st.info("No deficits.")
+            else:
+                st.dataframe(alloc["deficits"][["habitat","broad_group","distinctiveness","project_wide_change"]],
+                             use_container_width=True, height=300)
+
+        with st.expander("📈 Surpluses (project-wide change > 0)", expanded=False):
+            if alloc["surpluses"].empty:
+                st.info("No surpluses.")
+            else:
+                st.dataframe(alloc["surpluses"][["habitat","broad_group","distinctiveness","project_wide_change"]],
+                             use_container_width=True, height=300)
+
+        with st.expander("🔗 Eligibility matrix (your trading rules)", expanded=False):
+            if alloc["eligibility"].empty:
+                st.info("No eligible offsets.")
+            else:
+                st.dataframe(alloc["eligibility"], use_container_width=True, height=360)
+
+        with st.expander("🧮 Surplus remaining by band (after on-site offsets)", expanded=False):
+            st.dataframe(alloc["surplus_remaining_by_band"], use_container_width=True, height=220)
+
+        with st.expander("📋 Normalised input table (Area Habitats)", expanded=False):
+            st.dataframe(area_norm, use_container_width=True, height=420)
+
+# ---- Hedgerows
 with tabs[1]:
-    st.subheader("Trading Summary — Hedgerows (normalised)")
-    st.caption(f"Source sheet: `{hedge_sheet or 'not found'}`")
+    st.subheader("Hedgerows")
     if hedge_norm.empty:
         st.info("No Hedgerows trading summary detected.")
     else:
-        st.dataframe(hedge_norm, use_container_width=True, height=480)
+        with st.expander("📋 Normalised table — Hedgerows", expanded=True):
+            st.caption(f"Source sheet: `{hedge_sheet or 'not found'}`")
+            st.dataframe(hedge_norm, use_container_width=True, height=480)
 
-# ---- Watercourses (normalised only)
+# ---- Watercourses
 with tabs[2]:
-    st.subheader("Trading Summary — Watercourses (normalised)")
-    st.caption(f"Source sheet: `{water_sheet or 'not found'}`")
+    st.subheader("Watercourses")
     if water_norm.empty:
         st.info("No Watercourses trading summary detected.")
     else:
-        st.dataframe(water_norm, use_container_width=True, height=480)
+        with st.expander("📋 Normalised table — Watercourses", expanded=True):
+            st.caption(f"Source sheet: `{water_sheet or 'not found'}`")
+            st.dataframe(water_norm, use_container_width=True, height=480)
 
 # ---- Exports
 with tabs[3]:
     st.subheader("Exports")
-
     norm_concat = pd.concat(
         [df for df in [area_norm, hedge_norm, water_norm] if not df.empty],
         ignore_index=True
@@ -642,33 +725,41 @@ with tabs[3]:
     if norm_concat.empty:
         st.info("No normalised rows to export.")
     else:
-        st.dataframe(norm_concat, use_container_width=True, height=420)
+        with st.expander("📦 Normalised requirements (all categories)"):
+            st.dataframe(norm_concat, use_container_width=True, height=420)
 
-        # Requirements export (only deficits)
         req_export = norm_concat.copy()
         req_export["required_offsite_units"] = req_export["project_wide_change"].apply(
             lambda x: abs(x) if pd.notna(x) and x < 0 else 0
         )
         req_export = req_export[req_export["required_offsite_units"] > 0].reset_index(drop=True)
 
-        st.download_button("Download normalised requirements — CSV",
-                           req_export.to_csv(index=False).encode("utf-8"),
-                           "requirements_export.csv", "text/csv")
-        st.download_button("Download normalised requirements — JSON",
-                           req_export.to_json(orient="records", indent=2).encode("utf-8"),
-                           "requirements_export.json", "application/json")
+        cA, cB = st.columns(2)
+        with cA:
+            st.download_button("⬇️ Download normalised requirements — CSV",
+                               req_export.to_csv(index=False).encode("utf-8"),
+                               "requirements_export.csv", "text/csv")
+        with cB:
+            st.download_button("⬇️ Download normalised requirements — JSON",
+                               req_export.to_json(orient="records", indent=2).encode("utf-8"),
+                               "requirements_export.json", "application/json")
 
-        # Residual-to-mitigate (Area) INCLUDING NG remainder row
         combined_residual_area = st.session_state.get("combined_residual_area", pd.DataFrame())
         if not combined_residual_area.empty:
-            st.download_button("Download residual to mitigate (Area incl. NG remainder) — CSV",
-                               combined_residual_area.to_csv(index=False).encode("utf-8"),
-                               "area_residual_to_mitigate_incl_ng_remainder.csv", "text/csv")
-            st.download_button("Download residual to mitigate (Area incl. NG remainder) — JSON",
-                               combined_residual_area.to_json(orient="records", indent=2).encode("utf-8"),
-                               "area_residual_to_mitigate_incl_ng_remainder.json", "application/json")
+            st.markdown("---")
+            st.markdown("**Residual to mitigate (Area incl. NG remainder)**")
+            c1, c2 = st.columns(2)
+            with c1:
+                st.download_button("⬇️ Download residual (CSV)",
+                                   combined_residual_area.to_csv(index=False).encode("utf-8"),
+                                   "area_residual_to_mitigate_incl_ng_remainder.csv", "text/csv")
+            with c2:
+                st.download_button("⬇️ Download residual (JSON)",
+                                   combined_residual_area.to_json(orient="records", indent=2).encode("utf-8"),
+                                   "area_residual_to_mitigate_incl_ng_remainder.json", "application/json")
 
-st.caption("Hidden sheets are fine — we read by name. If your template wording ever shifts, we can widen the patterns quickly.")
+st.caption("Tip: The headline card is the number you quote. Everything else is available below for audit and QA.")
+
 
 
 
