@@ -359,92 +359,112 @@ def apply_area_offsets(area_df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
 # ------------------------------
 def parse_headline_area_deficit(xls: pd.ExcelFile) -> Optional[float]:
     """
-    Robustly obtain the Area Habitat Units Net Gain deficit (10% above baseline):
-    1) Prefer a 'Unit Type' table row for 'Area habitat units' → 'Unit Deficit' (or 'Shortfall').
-    2) Else, derive from Headline lines:
-          on-site/off-site baseline habitat units
-          on-site/off-site post-intervention habitat units
-       deficit = max( 0.10*(on_b+off_b) - ((on_p+off_p) - (on_b+off_b)), 0 )
-    Scans all sheets to cope with custom naming / hidden tabs.
+    Strictly parse Headline Results → Unit Type table and return:
+      Area habitat units  →  Unit Deficit
+    If the table isn't found for any reason, fall back to derivation from
+    baseline/post lines on the same sheet.
     """
-    import re
-    import pandas as pd
+    import pandas as pd, re
+
+    SHEET_NAME = "Headline Results"
 
     def clean(s):
         if s is None or (isinstance(s, float) and pd.isna(s)): return ""
         return re.sub(r"\s+", " ", str(s).strip())
 
-    def norm_cols(df):
-        return {re.sub(r"[^a-z0-9]+", "_", str(c).lower()).strip("_"): c for c in df.columns}
+    # Load the Headline Results sheet as raw (no headers)
+    try:
+        raw = pd.read_excel(xls, sheet_name=SHEET_NAME, header=None)
+    except Exception:
+        return None
 
-    # ---- helpers for numeric extraction
+    # ---- 1) Locate the Unit-Type table header row on this sheet
+    header_idx = None
+    for i in range(min(200, len(raw))):
+        txt = " ".join([clean(x).lower() for x in raw.iloc[i].tolist()])
+        if "unit type" in txt and (("unit deficit" in txt) or ("shortfall" in txt)):
+            header_idx = i
+            break
+
+    if header_idx is not None:
+        # Build a dataframe from the header row downward
+        df = raw.iloc[header_idx:].copy()
+        df.columns = [clean(x) for x in df.iloc[0].tolist()]
+        df = df.iloc[1:].reset_index(drop=True)
+
+        # Trim the table to the first blank separator (if any)
+        # i.e., stop where the whole row becomes empty-ish
+        stop_at = None
+        for r in range(len(df)):
+            row_txt = " ".join([clean(v) for v in df.iloc[r].tolist()])
+            if row_txt == "":
+                stop_at = r
+                break
+        if stop_at is not None:
+            df = df.iloc[:stop_at].copy()
+
+        # Normalise column names
+        norm = {re.sub(r"[^a-z0-9]+", "_", c.lower()).strip("_"): c for c in df.columns}
+
+        # Identify the important columns (robust to slight label changes)
+        unit_col = None
+        for k in ["unit_type", "type", "unit"]:
+            if k in norm: unit_col = norm[k]; break
+
+        deficit_col = None
+        for k in ["unit_deficit", "units_deficit", "deficit", "shortfall", "unit_shortfall", "deficit_units"]:
+            if k in norm: deficit_col = norm[k]; break
+
+        # If we somehow didn't catch the deficit col, try a fuzzy pick
+        if deficit_col is None:
+            for col in df.columns:
+                if re.search(r"(deficit|shortfall)", col, flags=re.I):
+                    deficit_col = col
+                    break
+
+        # Find the "Area habitat units" row.
+        def is_area_row(row) -> bool:
+            joined = " ".join([clean(v).lower() for v in row.tolist()])
+            # prefer checking the "Unit Type" column if present
+            if unit_col:
+                val = clean(row.get(unit_col, "")).lower()
+                if re.search(r"\barea\s*habitat\s*units\b", val): return True
+            # fallback: scan whole row
+            return re.search(r"\barea\s*habitat\s*units\b", joined) is not None
+
+        mask = df.apply(is_area_row, axis=1)
+        if mask.any():
+            row = df.loc[mask].iloc[0]
+            # Prefer the explicit deficit column
+            if deficit_col:
+                v = pd.to_numeric(row.get(deficit_col), errors="coerce")
+                if pd.notna(v):
+                    return float(v)
+            # Fallback: take last numeric on the row
+            nums = pd.to_numeric(row, errors="coerce").dropna()
+            if not nums.empty:
+                return float(nums.iloc[-1])
+
+    # ---- 2) SAFETY NET: derive from lines if table not found (same sheet)
     def last_numeric_in_row(row) -> Optional[float]:
         ser = pd.Series(row)
-        # strip common symbols then coerce
         ser = ser.map(lambda x: re.sub(r"[✓▲^]", "", str(x)) if isinstance(x, str) else x)
         nums = pd.to_numeric(ser, errors="coerce").dropna()
         return float(nums.iloc[-1]) if not nums.empty else None
 
-    # ---- Try table-style parsing on a given raw sheet
-    def try_table_on_raw(raw: pd.DataFrame) -> Optional[float]:
-        hdr_idx = None
-        for i in range(min(200, len(raw))):
-            row_txt = " ".join([clean(x).lower() for x in raw.iloc[i].tolist()])
-            if "unit" in row_txt and ("deficit" in row_txt or "shortfall" in row_txt) and ("target" in row_txt or "baseline" in row_txt):
-                hdr_idx = i
-                break
-        if hdr_idx is None:
-            return None
-        df = raw.iloc[hdr_idx:].copy()
-        df.columns = [clean(x) for x in df.iloc[0].tolist()]
-        df = df.iloc[1:].reset_index(drop=True)
+    vals = {}
+    for i in range(len(raw)):
+        line = " ".join([clean(x).lower() for x in raw.iloc[i].tolist()])
+        if re.search(r"\bon[-\s]?site\b.*baseline.*habitat units", line):
+            vals["on_b"] = last_numeric_in_row(raw.iloc[i].tolist())
+        elif re.search(r"\boff[-\s]?site\b.*baseline.*habitat units", line):
+            vals["off_b"] = last_numeric_in_row(raw.iloc[i].tolist())
+        elif re.search(r"\bon[-\s]?site\b.*post[-\s]?intervention.*habitat units", line):
+            vals["on_p"] = last_numeric_in_row(raw.iloc[i].tolist())
+        elif re.search(r"\boff[-\s]?site\b.*post[-\s]?intervention.*habitat units", line):
+            vals["off_p"] = last_numeric_in_row(raw.iloc[i].tolist())
 
-        # Normalise columns + synonyms
-        cols = norm_cols(df)
-        deficit_col = None
-        for key in ["unit_deficit", "deficit", "units_deficit", "shortfall", "unit_shortfall", "deficit_units"]:
-            if key in cols:
-                deficit_col = cols[key]
-                break
-
-        # Find the Area row (robust label match)
-        def row_has_area(r) -> bool:
-            s = " ".join([clean(v).lower() for v in r.tolist()])
-            # tolerate punctuation/spacing variants
-            return bool(re.search(r"\barea\b.*\bhabitat\b.*\bunit", s))
-
-        mask = df.apply(row_has_area, axis=1)
-        if not mask.any():
-            return None
-        row = df[mask].iloc[0]
-
-        if deficit_col:
-            val = pd.to_numeric(row.get(deficit_col), errors="coerce")
-            if pd.notna(val):
-                return float(val)
-
-        # Fallback: use last numeric on the Area row
-        return last_numeric_in_row(row)
-
-    # ---- Derive from headline lines on a given raw sheet
-    def try_derive_from_lines(raw: pd.DataFrame) -> Optional[float]:
-        vals = {}
-        for i in range(len(raw)):
-            txt = " ".join([clean(x).lower() for x in raw.iloc[i].tolist()])
-            # allow 'on site' / 'on-site' / 'onsite'
-            if re.search(r"\bon[-\s]?site\b.*baseline.*habitat units", txt):
-                vals["on_b"] = last_numeric_in_row(raw.iloc[i].tolist())
-            elif re.search(r"\boff[-\s]?site\b.*baseline.*habitat units", txt):
-                vals["off_b"] = last_numeric_in_row(raw.iloc[i].tolist())
-            elif re.search(r"\bon[-\s]?site\b.*post[-\s]?intervention.*habitat units", txt):
-                vals["on_p"] = last_numeric_in_row(raw.iloc[i].tolist())
-            elif re.search(r"\boff[-\s]?site\b.*post[-\s]?intervention.*habitat units", txt):
-                vals["off_p"] = last_numeric_in_row(raw.iloc[i].tolist())
-
-        # Need at least some of these numbers to proceed
-        if not any(k in vals for k in ["on_b", "off_b", "on_p", "off_p"]):
-            return None
-
+    if any(k in vals for k in ["on_b", "off_b", "on_p", "off_p"]):
         on_b  = vals.get("on_b")  or 0.0
         off_b = vals.get("off_b") or 0.0
         on_p  = vals.get("on_p")  or 0.0
@@ -456,24 +476,8 @@ def parse_headline_area_deficit(xls: pd.ExcelFile) -> Optional[float]:
         required_10pc  = 0.10 * baseline_total
         return float(max(required_10pc - net_change, 0.0))
 
-    # ---- Scan all sheets until we get a value
-    for sheet_name in xls.sheet_names:
-        try:
-            raw = pd.read_excel(xls, sheet_name=sheet_name, header=None)
-        except Exception:
-            continue
-
-        # 1) table
-        v = try_table_on_raw(raw)
-        if v is not None:
-            return v
-
-        # 2) derived
-        v = try_derive_from_lines(raw)
-        if v is not None:
-            return v
-
     return None
+
 
 
 # ------------------------------
