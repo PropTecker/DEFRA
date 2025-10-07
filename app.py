@@ -559,7 +559,19 @@ with tabs[0]:
                     "surplus_remaining_units": "surplus_units_after_allocation_and_NG"
                 })
             )
+        # --- One-line, always-visible total overall surplus (only when it actually exists) ---
+        if overflow_happened:
+            total_overall_surplus_row = pd.DataFrame([{
+                "label": "Total overall surplus (after all allocations & 10% NG)",
+                "units": round(overall_surplus_after_all, 4)
+            }])
+            st.write(total_overall_surplus_row)
+            # keep for exports
+            st.session_state["total_overall_surplus_area"] = float(round(overall_surplus_after_all, 4))
+        else:
+            st.session_state["total_overall_surplus_area"] = 0.0
 
+        
         # Headline table
         st.dataframe(combined_residual, use_container_width=True, height=260)
 
