@@ -1,21 +1,12 @@
-# app.py — DEFRA BNG Metric Reader (robust band mapping from raw sheet)
-# ---------------------------------------------------------------------
-# What’s inside
-# - Upload DEFRA BNG Metric (.xlsx)
-# - Parse Trading Summaries for Area Habitats / Hedgerows / Watercourses
-# - BROAD GROUP: taken from the column immediately to the right of Habitat (with safeguards)
-# - DISTINCTIVENESS: mapped from the RAW sheet (no headers) by scanning section headers
-#     • Detects 'Very High Distinctiveness' even when it’s in B11 (merged/subheading)
-#     • Tracks active band across the sheet and assigns to exact habitat rows by name match
-#     • Prioritises "Very High" before "High" to avoid false matches
-# - Area Habitats trading rules:
-#     • Very High: same habitat only
-#     • High: same habitat only
-#     • Medium: SAME Broad Group; distinctiveness ≥ Medium
-#     • Low: ≥ Low; remaining Low surplus applied to Headline Area Unit Deficit
-# - “Still needs mitigation OFF-SITE”: habitat residuals + Net Gain remainder
-#     (NG remainder = Headline deficit after Low − sum(habitat residuals))
+# app.py — DEFRA BNG Metric Reader
+# - Supports .xlsx / .xlsm / .xlsb (no macros run)
+# - Robust Headline Results parser (Unit Type table; fallback: derive from baseline/post)
+# - Distinctiveness from raw (detects section headers like "Very High Distinctiveness" in B11)
+# - Broad Group from the cell to the right of Habitat
+# - Area trading rules + Low→Headline + Net Gain remainder to quote
 
+import io
+import os
 import re
 from typing import Dict, List, Optional, Tuple
 
@@ -25,7 +16,40 @@ import streamlit as st
 st.set_page_config(page_title="DEFRA BNG Metric Reader", page_icon="🌿", layout="wide")
 
 # ------------------------------
-# Utilities
+# File opening (xlsx / xlsm / xlsb) — macros are NOT executed
+# ------------------------------
+def open_metric_workbook(uploaded_file) -> pd.ExcelFile:
+    """
+    Open .xlsx / .xlsm with openpyxl, and .xlsb with pyxlsb.
+    We only read cell values; no macros are executed.
+    """
+    data = uploaded_file.read() if hasattr(uploaded_file, "read") else uploaded_file
+    name = getattr(uploaded_file, "name", "") or ""
+    ext = os.path.splitext(name)[1].lower()
+
+    # Try the most likely engine first
+    if ext in [".xlsx", ".xlsm", ""]:
+        try:
+            return pd.ExcelFile(io.BytesIO(data), engine="openpyxl")
+        except Exception:
+            pass
+    if ext == ".xlsb":
+        try:
+            return pd.ExcelFile(io.BytesIO(data), engine="pyxlsb")
+        except Exception:
+            pass
+
+    # Fallbacks (try both engines)
+    for eng in ("openpyxl", "pyxlsb"):
+        try:
+            return pd.ExcelFile(io.BytesIO(data), engine=eng)
+        except Exception:
+            continue
+
+    raise RuntimeError("Could not open workbook. Try re-saving as .xlsx or .xlsm.")
+
+# ------------------------------
+# Generic utils
 # ------------------------------
 def clean_text(x) -> str:
     if x is None or (isinstance(x, float) and pd.isna(x)):
@@ -46,15 +70,16 @@ def coerce_num(s: pd.Series) -> pd.Series:
 def find_sheet(xls: pd.ExcelFile, targets: List[str]) -> Optional[str]:
     existing = {canon(s): s for s in xls.sheet_names}
     for t in targets:
-        if canon(t) in existing:
-            return existing[canon(t)]
+        ct = canon(t)
+        if ct in existing:
+            return existing[ct]
     for s in xls.sheet_names:
         if any(canon(t) in canon(s) for t in targets):
             return s
     return None
 
 def find_header_row(df: pd.DataFrame, within_rows: int = 80) -> Optional[int]:
-    """Heuristic: header has 'Group' and on/off/project wording."""
+    """Find header row for Trading Summary tables (has group + on/off/project wording)."""
     for i in range(min(within_rows, len(df))):
         row = " ".join([clean_text(x) for x in df.iloc[i].tolist()]).lower()
         if ("group" in row) and (("on-site" in row and "off-site" in row and "project" in row)
@@ -62,15 +87,23 @@ def find_header_row(df: pd.DataFrame, within_rows: int = 80) -> Optional[int]:
             return i
     return None
 
+def col_like(df: pd.DataFrame, *cands: str) -> Optional[str]:
+    cols = {canon(c): c for c in df.columns}
+    for c in cands:
+        if canon(c) in cols:
+            return cols[canon(c)]
+    for k, v in cols.items():
+        if any(canon(c) in k for c in cands):
+            return v
+    return None
+
 # ------------------------------
-# Loaders
+# Loaders for Trading Summaries
 # ------------------------------
 def load_raw_sheet(xls: pd.ExcelFile, sheet: str) -> pd.DataFrame:
-    """Load sheet as raw (no headers)."""
     return pd.read_excel(xls, sheet_name=sheet, header=None)
 
 def load_trading_df(xls: pd.ExcelFile, sheet: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """Return (parsed table df, raw df)."""
     raw = load_raw_sheet(xls, sheet)
     hdr = find_header_row(raw)
     if hdr is None:
@@ -82,16 +115,6 @@ def load_trading_df(xls: pd.ExcelFile, sheet: str) -> Tuple[pd.DataFrame, pd.Dat
     df = df.loc[:, ~df.columns.duplicated()].copy()
     df = df.dropna(how="all").reset_index(drop=True)
     return df, raw
-
-def col_like(df: pd.DataFrame, *cands: str) -> Optional[str]:
-    cols = {canon(c): c for c in df.columns}
-    for c in cands:
-        if canon(c) in cols:
-            return cols[canon(c)]
-    for k, v in cols.items():
-        if any(canon(c) in k for c in cands):
-            return v
-    return None
 
 # ------------------------------
 # Broad Group resolution (right of Habitat)
@@ -129,9 +152,8 @@ def resolve_broad_group_col(df: pd.DataFrame, habitat_col: str, broad_col_guess:
     return broad_col_guess
 
 # ------------------------------
-# Distinctiveness from RAW (robust)
+# Distinctiveness tagging from RAW (captures section headers like B11)
 # ------------------------------
-# Regex patterns (prioritise VERY HIGH before HIGH)
 VH_PAT = re.compile(r"\bvery\s*high\b.*distinct", re.I)
 H_PAT  = re.compile(r"\bhigh\b.*distinct", re.I)
 M_PAT  = re.compile(r"\bmedium\b.*distinct", re.I)
@@ -139,21 +161,15 @@ L_PAT  = re.compile(r"\blow\b.*distinct", re.I)
 
 def build_band_map_from_raw(raw: pd.DataFrame, habitats: List[str]) -> Dict[str, str]:
     """
-    Scan the raw sheet (no headers) to follow section headers like:
-      "Very High Distinctiveness", "High Distinctiveness", etc.
-    Then map the ACTIVE band to rows whose cells match any of the target habitat names.
-
-    Returns: { habitat_name_exact: band }
+    Scan the raw sheet (no headers) for section headers 'Very High Distinctiveness', etc.
+    Track active band and assign it to exact habitat names encountered afterwards.
     """
-    # Pre-clean habitats for faster matching
     target_set = {clean_text(h) for h in habitats if isinstance(h, str) and clean_text(h)}
     band_map: Dict[str, str] = {}
-
     active_band: Optional[str] = None
-    max_scan_cols = min(8, raw.shape[1])  # scan first 8 cols to catch headings in early columns
+    max_scan_cols = min(8, raw.shape[1])
 
     for r in range(len(raw)):
-        # Build a line of text from the first 8 columns to detect section headers
         texts = []
         for c in range(max_scan_cols):
             val = raw.iat[r, c] if c < raw.shape[1] else None
@@ -162,7 +178,6 @@ def build_band_map_from_raw(raw: pd.DataFrame, habitats: List[str]) -> Dict[str,
         joined = " ".join([t for t in texts if t]).strip()
 
         if joined:
-            # Prioritise Very High before High
             if VH_PAT.search(joined):
                 active_band = "Very High"
             elif H_PAT.search(joined) and not VH_PAT.search(joined):
@@ -172,9 +187,7 @@ def build_band_map_from_raw(raw: pd.DataFrame, habitats: List[str]) -> Dict[str,
             elif L_PAT.search(joined):
                 active_band = "Low"
 
-        # If we have an active band, try to assign it to any habitat name that appears in the row
         if active_band:
-            # Check all cells in the row to see if they exactly equal a target habitat name
             for c in range(raw.shape[1]):
                 val = raw.iat[r, c]
                 if isinstance(val, str):
@@ -185,7 +198,7 @@ def build_band_map_from_raw(raw: pd.DataFrame, habitats: List[str]) -> Dict[str,
     return band_map
 
 # ------------------------------
-# Normalised requirements (generic)
+# Normalise Trading Summary (generic)
 # ------------------------------
 def normalise_requirements(
     xls: pd.ExcelFile,
@@ -225,7 +238,7 @@ def normalise_requirements(
         if c in df.columns:
             df[c] = coerce_num(df[c])
 
-    # DISTINCTIVENESS: build a band map from RAW and map back to parsed df habitats
+    # DISTINCTIVENESS from RAW → map back to parsed df habitat strings
     habitat_list = df[habitat_col].astype(str).map(clean_text).tolist()
     band_map = build_band_map_from_raw(raw, habitat_list)
     df["__distinctiveness__"] = df[habitat_col].astype(str).map(lambda x: band_map.get(clean_text(x), pd.NA))
@@ -261,19 +274,12 @@ def can_offset_area(d_band: str, d_broad: str, d_hab: str,
 
     d_broad = clean_text(d_broad)
     s_broad = clean_text(s_broad)
-    d_hab = clean_text(d_hab)
-    s_hab = clean_text(s_hab)
+    d_hab = clean_text(d_hab); s_hab = clean_text(s_hab)
 
-    if d_band == "Very High":
-        return d_hab == s_hab  # exact habitat only
-    if d_band == "High":
-        return d_hab == s_hab  # exact habitat only
-    if d_band == "Medium":
-        # SAME BROAD GROUP and distinctiveness ≥ Medium
-        return (d_broad != "" and d_broad == s_broad) and (rs >= rd)
-    if d_band == "Low":
-        # same or better distinctiveness (>=)
-        return rs >= rd
+    if d_band == "Very High": return d_hab == s_hab  # exact habitat only
+    if d_band == "High":      return d_hab == s_hab  # exact habitat only
+    if d_band == "Medium":    return (d_broad != "" and d_broad == s_broad) and (rs >= rd)  # same group, >=
+    if d_band == "Low":       return rs >= rd
     return False
 
 def apply_area_offsets(area_df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
@@ -301,7 +307,7 @@ def apply_area_offsets(area_df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
                 })
     elig_df = pd.DataFrame(elig_rows)
 
-    # Greedy allocation
+    # Greedy allocation (prefer higher-band & larger surpluses)
     band_rank = {"Low": 1, "Medium": 2, "High": 3, "Very High": 4}
     sur = surpluses.copy()
     sur["__remain__"] = sur["project_wide_change"].astype(float)
@@ -309,23 +315,20 @@ def apply_area_offsets(area_df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
     remaining_records = []
     for _, d in deficits.iterrows():
         need = abs(float(d["project_wide_change"]))
-        d_band = str(d["distinctiveness"])
-        d_broad = d.get("broad_group", "")
-        d_hab = d.get("habitat", "")
+        d_band = str(d["distinctiveness"]); d_broad = d.get("broad_group",""); d_hab = d.get("habitat","")
 
         elig_idx = [si for si, s in sur.iterrows()
-                    if can_offset_area(d_band, d_broad, d_hab, str(s["distinctiveness"]),
-                                       s.get("broad_group",""), s.get("habitat",""))
+                    if can_offset_area(d_band, d_broad, d_hab,
+                                       str(s["distinctiveness"]), s.get("broad_group",""), s.get("habitat",""))
                     and sur.loc[si, "__remain__"] > 0]
-        elig_idx = sorted(
-            elig_idx,
-            key=lambda sidx: (-band_rank.get(str(sur.loc[sidx, "distinctiveness"]), 0), -sur.loc[sidx, "__remain__"])
-        )
+        elig_idx = sorted(elig_idx,
+                          key=lambda i: (-band_rank.get(str(sur.loc[i,"distinctiveness"]), 0),
+                                         -sur.loc[i,"__remain__"]))
 
-        for sidx in elig_idx:
-            use = min(need, sur.loc[sidx, "__remain__"])
+        for i in elig_idx:
+            use = min(need, sur.loc[i,"__remain__"])
             if use > 0:
-                sur.loc[sidx, "__remain__"] -= use
+                sur.loc[i,"__remain__"] -= use
                 need -= use
             if need <= 1e-9:
                 break
@@ -338,10 +341,9 @@ def apply_area_offsets(area_df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
                 "unmet_units_after_on_site_offset": round(need, 4)
             })
 
-    # Surplus remaining by band
-    surplus_remaining_by_band = sur.groupby("distinctiveness", dropna=False)["__remain__"].sum().reset_index()
-    surplus_remaining_by_band = surplus_remaining_by_band.rename(columns={"distinctiveness": "band",
-                                                                          "__remain__": "surplus_remaining_units"})
+    surplus_remaining_by_band = sur.groupby("distinctiveness", dropna=False)["__remain__"] \
+                                   .sum().reset_index() \
+                                   .rename(columns={"distinctiveness":"band","__remain__":"surplus_remaining_units"})
 
     return {
         "deficits": deficits.sort_values("project_wide_change"),
@@ -355,30 +357,32 @@ def apply_area_offsets(area_df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
     }
 
 # ------------------------------
-# Headline Results parsing (for Area Habitat units)
+# Headline Results — Area habitat units → Unit Deficit
+# (strict to the Headline Results tab; fallback derive if needed)
 # ------------------------------
 def parse_headline_area_deficit(xls: pd.ExcelFile) -> Optional[float]:
     """
-    Strictly parse Headline Results → Unit Type table and return:
-      Area habitat units  →  Unit Deficit
-    If the table isn't found for any reason, fall back to derivation from
-    baseline/post lines on the same sheet.
+    Parse 'Headline Results' → Unit Type table to get:
+      Area habitat units → Unit Deficit (or Shortfall)
+    If the table isn't found, derive from baseline/post totals on the same sheet.
     """
-    import pandas as pd, re
-
     SHEET_NAME = "Headline Results"
 
     def clean(s):
         if s is None or (isinstance(s, float) and pd.isna(s)): return ""
         return re.sub(r"\s+", " ", str(s).strip())
 
-    # Load the Headline Results sheet as raw (no headers)
+    def last_numeric_in_row(row) -> Optional[float]:
+        ser = pd.Series(row).map(lambda x: re.sub(r"[✓▲^]", "", str(x)) if isinstance(x, str) else x)
+        nums = pd.to_numeric(ser, errors="coerce").dropna()
+        return float(nums.iloc[-1]) if not nums.empty else None
+
     try:
         raw = pd.read_excel(xls, sheet_name=SHEET_NAME, header=None)
     except Exception:
         return None
 
-    # ---- 1) Locate the Unit-Type table header row on this sheet
+    # 1) Locate the Unit-Type table header row
     header_idx = None
     for i in range(min(200, len(raw))):
         txt = " ".join([clean(x).lower() for x in raw.iloc[i].tolist()])
@@ -387,26 +391,22 @@ def parse_headline_area_deficit(xls: pd.ExcelFile) -> Optional[float]:
             break
 
     if header_idx is not None:
-        # Build a dataframe from the header row downward
         df = raw.iloc[header_idx:].copy()
         df.columns = [clean(x) for x in df.iloc[0].tolist()]
         df = df.iloc[1:].reset_index(drop=True)
 
-        # Trim the table to the first blank separator (if any)
-        # i.e., stop where the whole row becomes empty-ish
+        # Trim to first blank separator
         stop_at = None
         for r in range(len(df)):
             row_txt = " ".join([clean(v) for v in df.iloc[r].tolist()])
             if row_txt == "":
-                stop_at = r
-                break
+                stop_at = r; break
         if stop_at is not None:
             df = df.iloc[:stop_at].copy()
 
-        # Normalise column names
+        # Normalise columns
         norm = {re.sub(r"[^a-z0-9]+", "_", c.lower()).strip("_"): c for c in df.columns}
 
-        # Identify the important columns (robust to slight label changes)
         unit_col = None
         for k in ["unit_type", "type", "unit"]:
             if k in norm: unit_col = norm[k]; break
@@ -415,43 +415,30 @@ def parse_headline_area_deficit(xls: pd.ExcelFile) -> Optional[float]:
         for k in ["unit_deficit", "units_deficit", "deficit", "shortfall", "unit_shortfall", "deficit_units"]:
             if k in norm: deficit_col = norm[k]; break
 
-        # If we somehow didn't catch the deficit col, try a fuzzy pick
         if deficit_col is None:
             for col in df.columns:
                 if re.search(r"(deficit|shortfall)", col, flags=re.I):
-                    deficit_col = col
-                    break
+                    deficit_col = col; break
 
-        # Find the "Area habitat units" row.
+        # Find "Area habitat units" row
         def is_area_row(row) -> bool:
-            joined = " ".join([clean(v).lower() for v in row.tolist()])
-            # prefer checking the "Unit Type" column if present
             if unit_col:
                 val = clean(row.get(unit_col, "")).lower()
                 if re.search(r"\barea\s*habitat\s*units\b", val): return True
-            # fallback: scan whole row
+            joined = " ".join([clean(v).lower() for v in row.tolist()])
             return re.search(r"\barea\s*habitat\s*units\b", joined) is not None
 
         mask = df.apply(is_area_row, axis=1)
         if mask.any():
             row = df.loc[mask].iloc[0]
-            # Prefer the explicit deficit column
             if deficit_col:
                 v = pd.to_numeric(row.get(deficit_col), errors="coerce")
-                if pd.notna(v):
-                    return float(v)
-            # Fallback: take last numeric on the row
-            nums = pd.to_numeric(row, errors="coerce").dropna()
-            if not nums.empty:
-                return float(nums.iloc[-1])
+                if pd.notna(v): return float(v)
+            # Fallback: last numeric on the row
+            ln = last_numeric_in_row(row.tolist())
+            if ln is not None: return ln
 
-    # ---- 2) SAFETY NET: derive from lines if table not found (same sheet)
-    def last_numeric_in_row(row) -> Optional[float]:
-        ser = pd.Series(row)
-        ser = ser.map(lambda x: re.sub(r"[✓▲^]", "", str(x)) if isinstance(x, str) else x)
-        nums = pd.to_numeric(ser, errors="coerce").dropna()
-        return float(nums.iloc[-1]) if not nums.empty else None
-
+    # 2) Fallback: derive from baseline/post lines on Headline Results
     vals = {}
     for i in range(len(raw)):
         line = " ".join([clean(x).lower() for x in raw.iloc[i].tolist()])
@@ -469,7 +456,6 @@ def parse_headline_area_deficit(xls: pd.ExcelFile) -> Optional[float]:
         off_b = vals.get("off_b") or 0.0
         on_p  = vals.get("on_p")  or 0.0
         off_p = vals.get("off_p") or 0.0
-
         baseline_total = on_b + off_b
         post_total     = on_p + off_p
         net_change     = post_total - baseline_total
@@ -478,17 +464,14 @@ def parse_headline_area_deficit(xls: pd.ExcelFile) -> Optional[float]:
 
     return None
 
-
-
 # ------------------------------
 # UI
 # ------------------------------
 st.title("🌿 DEFRA BNG Metric Reader")
-st.caption("Upload a DEFRA BNG Metric workbook (.xlsx). Extract normalised requirements. "
-           "For Area Habitats, apply distinctiveness trading rules and use remaining Low surplus to reduce the Headline Area Unit Deficit.")
+st.caption("Upload a DEFRA BNG Metric workbook. For Area Habitats, applies distinctiveness trading rules and uses remaining Low surplus to reduce the Headline Area Unit Deficit; adds the Net Gain remainder row to quote.")
 
 with st.sidebar:
-    file = st.file_uploader("Upload DEFRA BNG Metric (.xlsx)", type=["xlsx"])
+    file = st.file_uploader("Upload DEFRA BNG Metric (.xlsx / .xlsm / .xlsb)", type=["xlsx", "xlsm", "xlsb"])
     st.markdown("---")
     st.markdown("**Area rules:**\n"
                 "- Very High: same habitat only\n"
@@ -501,7 +484,7 @@ if not file:
     st.stop()
 
 try:
-    xls = pd.ExcelFile(file)
+    xls = open_metric_workbook(file)
 except Exception as e:
     st.error(f"Could not open workbook: {e}")
     st.stop()
@@ -509,7 +492,7 @@ except Exception as e:
 st.success("Workbook loaded.")
 st.write("**Sheets detected:**", xls.sheet_names)
 
-# Parse three categories
+# Candidate Trading Summary sheet names
 AREA_SHEETS = [
     "Trading Summary Area Habitats",
     "Area Habitats Trading Summary",
@@ -535,7 +518,7 @@ water_norm, water_map, water_sheet = normalise_requirements(xls, WATER_SHEETS, "
 
 tabs = st.tabs(["Area Habitats", "Hedgerows", "Watercourses", "Exports"])
 
-# ---- Area Habitats tab (with trading rules)
+# ---- Area Habitats tab (with trading rules + NG remainder)
 with tabs[0]:
     st.subheader("Trading Summary — Area Habitats")
     if area_norm.empty:
@@ -573,8 +556,10 @@ with tabs[0]:
             st.markdown("**Surplus remaining by band (after on-site offsets)**")
             st.dataframe(alloc["surplus_remaining_by_band"], use_container_width=True, height=160)
 
-        # Apply remaining Low surplus to Headline Area Unit Deficit
+        # Headline Area deficit
         headline_def = parse_headline_area_deficit(xls)
+
+        # Apply remaining Low surplus to Headline Area Unit Deficit
         low_remaining = float(
             alloc["surplus_remaining_by_band"].loc[
                 alloc["surplus_remaining_by_band"]["band"] == "Low", "surplus_remaining_units"
@@ -602,7 +587,7 @@ with tabs[0]:
             "remaining_net_gain_to_quote": None if remaining_ng_to_quote is None else round(remaining_ng_to_quote, 4),
         }]))
 
-        # Combined residuals table = habitat residuals + ONLY the NG remainder row (if > 0)
+        # Combined residuals = habitat residuals + ONLY the NG remainder row (if > 0)
         combined_residual = residual_table.copy()
         if remaining_ng_to_quote is not None and remaining_ng_to_quote > 1e-9:
             headline_row = pd.DataFrame([{
@@ -619,15 +604,11 @@ with tabs[0]:
         else:
             st.dataframe(combined_residual, use_container_width=True, height=260)
 
-        # Store for Exports tab
         st.session_state["combined_residual_area"] = combined_residual
 
-        # Download for Area residuals
-        st.download_button(
-            "Download residual off-site (Area incl. NG remainder) — CSV",
-            combined_residual.to_csv(index=False).encode("utf-8"),
-            "area_residual_offsite_incl_ng_remainder.csv", "text/csv"
-        )
+        st.download_button("Download residual off-site (Area incl. NG remainder) — CSV",
+                           combined_residual.to_csv(index=False).encode("utf-8"),
+                           "area_residual_offsite_incl_ng_remainder.csv", "text/csv")
 
 # ---- Hedgerows (normalised only)
 with tabs[1]:
@@ -647,11 +628,10 @@ with tabs[2]:
     else:
         st.dataframe(water_norm, use_container_width=True, height=480)
 
-# ---- Exports (normalised requirements + consolidated)
+# ---- Exports
 with tabs[3]:
     st.subheader("Exports")
 
-    # Normalised "requirements" across all three
     norm_concat = pd.concat(
         [df for df in [area_norm, hedge_norm, water_norm] if not df.empty],
         ignore_index=True
@@ -664,7 +644,7 @@ with tabs[3]:
     else:
         st.dataframe(norm_concat, use_container_width=True, height=420)
 
-        # Requirements export (negative project_wide_change only)
+        # Requirements export (only deficits)
         req_export = norm_concat.copy()
         req_export["required_offsite_units"] = req_export["project_wide_change"].apply(
             lambda x: abs(x) if pd.notna(x) and x < 0 else 0
@@ -678,7 +658,7 @@ with tabs[3]:
                            req_export.to_json(orient="records", indent=2).encode("utf-8"),
                            "requirements_export.json", "application/json")
 
-        # Residual-to-mitigate (Area) INCLUDING the NG remainder row
+        # Residual-to-mitigate (Area) INCLUDING NG remainder row
         combined_residual_area = st.session_state.get("combined_residual_area", pd.DataFrame())
         if not combined_residual_area.empty:
             st.download_button("Download residual to mitigate (Area incl. NG remainder) — CSV",
@@ -688,7 +668,8 @@ with tabs[3]:
                                combined_residual_area.to_json(orient="records", indent=2).encode("utf-8"),
                                "area_residual_to_mitigate_incl_ng_remainder.json", "application/json")
 
-st.caption("Hidden sheets are fine — we read by name. If your template wording shifts, we can widen the header/band patterns.")
+st.caption("Hidden sheets are fine — we read by name. If your template wording ever shifts, we can widen the patterns quickly.")
+
 
 
 
