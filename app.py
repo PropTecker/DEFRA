@@ -836,13 +836,15 @@ with tabs[0]:
             "</p></div>",
             unsafe_allow_html=True
         )
-        with st.expander("📊 Sankey — Offsets & Net Gain flows", expanded=False):
+        with st.expander("📊 Sankey — Offsets → Deficits → Bundled sinks", expanded=False):
             sankey_fig = build_area_sankey_clean(
                 flows_matrix=flows_matrix,
                 residual_table=residual_table,
-                remaining_ng_to_quote=remaining_ng_to_quote
+                remaining_ng_to_quote=remaining_ng_to_quote,
+                overall_surplus_after_all=overall_surplus_after_all
             )
             st.plotly_chart(sankey_fig, use_container_width=True, theme="streamlit")
+
 
         
         # ---------- HERO CARD ----------
