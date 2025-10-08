@@ -21,38 +21,183 @@ st.set_page_config(page_title="DEFRA BNG Metric Reader", page_icon="🌿", layou
 st.markdown(
     """
     <style>
-      .stApp { background: radial-gradient(1200px 600px at 0% -10%, rgba(120,200,160,.08), transparent),
-                           radial-gradient(1200px 600px at 100% 110%, rgba(120,160,220,.08), transparent); }
-      .block-container { padding-top: 2rem; padding-bottom: 2.5rem; }
-      .hero-card {
-        border-radius: 20px; padding: 1.2rem 1.2rem 1rem; margin: .2rem 0 1rem;
-        background: var(--hero-bg, rgba(250,250,250,0.65)); backdrop-filter: blur(8px);
-        border: 1px solid rgba(120,120,120,0.12); box-shadow: 0 6px 22px rgba(0,0,0,.08);
+      .stApp { 
+        background: radial-gradient(1200px 600px at 0% -10%, rgba(120,200,160,.08), transparent),
+                    radial-gradient(1200px 600px at 100% 110%, rgba(120,160,220,.08), transparent); 
+      }
+      .block-container { 
+        padding-top: 2.5rem; 
+        padding-bottom: 3rem; 
+        max-width: 1400px;
+      }
+      
+      /* Section Headers */
+      .section-header {
+        font-size: 1.5rem;
+        font-weight: 700;
+        margin: 2rem 0 1rem 0;
+        padding-bottom: 0.5rem;
+        border-bottom: 2px solid rgba(120,200,160,0.3);
+        color: var(--text-color, #1f1f1f);
       }
       @media (prefers-color-scheme: dark) {
-        .hero-card { --hero-bg: rgba(22,22,22,0.55); border-color: rgba(255,255,255,0.08); }
+        .section-header { 
+          color: var(--text-color, #ffffff); 
+          border-bottom-color: rgba(120,200,160,0.4);
+        }
       }
-      .hero-title { font-weight: 700; font-size: 1.15rem; margin: 0 0 .25rem 0; display: flex; align-items: center; gap: .5rem; }
-      .hero-sub { opacity: .75; font-size: .92rem; margin-top: 0; }
-      .kpi { display: grid; gap: .3rem; padding: .8rem 1rem; border-radius: 14px; border: 1px solid rgba(120,120,120,0.12); background: rgba(180,180,180,0.06); }
-      .kpi .label { opacity: .75; font-size: .8rem; } .kpi .value { font-weight: 700; font-size: 1.2rem; }
-      .exp-label { font-weight: 700; font-size: .98rem; }
-      .explain-card{
-        border-radius:16px; padding:14px 16px; margin:0 0 12px 0;
-        background: var(--explain-bg, rgba(255,255,255,0.65));
-        border:1px solid rgba(120,120,120,0.12);
-        box-shadow: 0 3px 14px rgba(0,0,0,.06);
-        backdrop-filter: blur(6px);
+      
+      /* Hero Card */
+      .hero-card {
+        border-radius: 20px; 
+        padding: 1.5rem 1.5rem 1.2rem; 
+        margin: 1.5rem 0 1.5rem 0;
+        background: var(--hero-bg, rgba(250,250,250,0.75)); 
+        backdrop-filter: blur(10px);
+        border: 1px solid rgba(120,200,160,0.2); 
+        box-shadow: 0 8px 24px rgba(0,0,0,.09);
+      }
+      @media (prefers-color-scheme: dark) {
+        .hero-card { 
+          --hero-bg: rgba(22,22,22,0.65); 
+          border-color: rgba(120,200,160,0.25); 
+        }
+      }
+      .hero-title { 
+        font-weight: 700; 
+        font-size: 1.25rem; 
+        margin: 0 0 .35rem 0; 
+        display: flex; 
+        align-items: center; 
+        gap: .6rem; 
+        color: var(--hero-title-color, #1a5d1a);
+      }
+      @media (prefers-color-scheme: dark) {
+        .hero-title { color: var(--hero-title-color, #78c8a0); }
+      }
+      .hero-sub { 
+        opacity: .8; 
+        font-size: .95rem; 
+        margin-top: 0; 
+        line-height: 1.5;
+      }
+      
+      /* KPI Cards */
+      .kpi { 
+        display: grid; 
+        gap: .4rem; 
+        padding: 1rem 1.2rem; 
+        border-radius: 16px; 
+        border: 1px solid rgba(120,200,160,0.2); 
+        background: var(--kpi-bg, rgba(250,250,250,0.5));
+        box-shadow: 0 2px 8px rgba(0,0,0,.04);
+        transition: transform 0.2s ease, box-shadow 0.2s ease;
+      }
+      .kpi:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 4px 12px rgba(0,0,0,.08);
+      }
+      @media (prefers-color-scheme: dark) {
+        .kpi { 
+          --kpi-bg: rgba(30,30,30,0.6); 
+          border-color: rgba(120,200,160,0.25); 
+        }
+      }
+      .kpi .label { 
+        opacity: .75; 
+        font-size: .85rem; 
+        font-weight: 500;
+      } 
+      .kpi .value { 
+        font-weight: 700; 
+        font-size: 1.4rem; 
+        color: var(--kpi-value-color, #1a5d1a);
+      }
+      @media (prefers-color-scheme: dark) {
+        .kpi .value { color: var(--kpi-value-color, #78c8a0); }
+      }
+      
+      /* Explainer Card */
+      .explain-card {
+        border-radius: 18px; 
+        padding: 1.2rem 1.4rem; 
+        margin: 1rem 0 1.5rem 0;
+        background: var(--explain-bg, rgba(255,255,255,0.75));
+        border: 1px solid rgba(120,200,160,0.15);
+        box-shadow: 0 4px 16px rgba(0,0,0,.06);
+        backdrop-filter: blur(8px);
       }
       @media (prefers-color-scheme: dark){
-        .explain-card{ --explain-bg: rgba(24,24,24,0.55); border-color: rgba(255,255,255,0.08); }
+        .explain-card { 
+          --explain-bg: rgba(24,24,24,0.65); 
+          border-color: rgba(120,200,160,0.2); 
+        }
       }
-      .explain-card h4{ margin:0 0 .25rem 0; font-weight:700; }
-      .explain-card p{ margin:.25rem 0; }
-      .explain-card ul{ margin:.4rem 0 .2rem 1.2rem; }
-      .explain-kv{ opacity:.85; font-size:.92rem; }
-      .explain-kv code{ font-weight:700; }
-      div[data-testid="stDataFrame"] { border-radius: 14px; overflow: hidden; }
+      .explain-card h4 { 
+        margin: 0 0 .5rem 0; 
+        font-weight: 700; 
+        font-size: 1.1rem;
+        color: var(--explain-title-color, #1a5d1a);
+      }
+      @media (prefers-color-scheme: dark) {
+        .explain-card h4 { color: var(--explain-title-color, #78c8a0); }
+      }
+      .explain-card p { 
+        margin: .4rem 0; 
+        line-height: 1.6;
+      }
+      .explain-card ul { 
+        margin: .5rem 0 .3rem 1.5rem; 
+        line-height: 1.6;
+      }
+      .explain-kv { 
+        opacity: .85; 
+        font-size: .92rem; 
+        padding: .8rem;
+        background: rgba(120,200,160,0.08);
+        border-radius: 8px;
+        margin-top: .8rem;
+      }
+      .explain-kv code { 
+        font-weight: 700; 
+        color: var(--code-color, #1a5d1a);
+      }
+      @media (prefers-color-scheme: dark) {
+        .explain-kv code { color: var(--code-color, #78c8a0); }
+      }
+      
+      /* DataFrames and Expanders */
+      div[data-testid="stDataFrame"] { 
+        border-radius: 14px; 
+        overflow: hidden; 
+        box-shadow: 0 2px 8px rgba(0,0,0,.04);
+      }
+      div[data-testid="stExpander"] {
+        border-radius: 14px;
+        border: 1px solid rgba(120,200,160,0.15);
+        margin: 0.8rem 0;
+        background: var(--expander-bg, rgba(255,255,255,0.3));
+      }
+      @media (prefers-color-scheme: dark) {
+        div[data-testid="stExpander"] {
+          --expander-bg: rgba(20,20,20,0.4);
+          border-color: rgba(120,200,160,0.2);
+        }
+      }
+      
+      /* Plotly Charts - Fix overflow */
+      .js-plotly-plot, .plotly {
+        width: 100% !important;
+      }
+      .plotly .main-svg {
+        width: 100% !important;
+        height: 100% !important;
+      }
+      
+      /* Spacing utilities */
+      .spacer-small { margin: 1rem 0; }
+      .spacer-medium { margin: 2rem 0; }
+      .spacer-large { margin: 3rem 0; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -697,14 +842,10 @@ def build_sankey_requirements_left(
 
     # Tight margins so it fits the expander; no autosizing creep
     fig.update_layout(
-        margin=dict(l=6, r=6, t=28 if show_zebra else 6, b=4),  # smaller top/bottom
-        height=max(360, height),  # guard but smaller target
-        autosize=False
-    )
-
-    # Prevent Plotly from expanding beyond container width
-    fig.update_layout(
-        autosize=False
+        margin=dict(l=10, r=10, t=32 if show_zebra else 10, b=10),
+        height=max(400, height),
+        autosize=False,
+        width=None  # Let container width control this
     )
 
     return fig
@@ -718,15 +859,28 @@ def build_sankey_requirements_left(
 
 # ---------------- UI ----------------
 st.title("🌿 DEFRA BNG Metric Reader")
+st.markdown(
+    '<p style="font-size: 1.05rem; opacity: 0.85; margin-top: -0.5rem; margin-bottom: 2rem;">'
+    'Professional analysis of Biodiversity Net Gain metrics with automated trading rules and visual flow diagrams'
+    '</p>',
+    unsafe_allow_html=True
+)
 
 with st.sidebar:
+    st.markdown('<div class="section-header" style="font-size: 1.1rem; margin-top: 0;">📁 Controls</div>', unsafe_allow_html=True)
     file = st.file_uploader("Upload DEFRA BNG Metric (.xlsx / .xlsm / .xlsb)", type=["xlsx", "xlsm", "xlsb"])
     st.markdown("---")
-    st.markdown("**Area rules:**\n"
-                "- Very High: same habitat only\n"
-                "- High: same habitat only\n"
-                "- Medium: same **broad group**; distinctiveness ≥ Medium\n"
-                "- Low: same or better (≥); remaining Low applied to Headline Area Unit Deficit")
+    st.markdown('<div style="font-size: 0.95rem;"><strong>Trading Rules (Area):</strong></div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div style="font-size: 0.85rem; line-height: 1.6; padding-left: 0.5rem;">'
+        '<ul style="margin: 0.5rem 0;">'
+        '<li><strong>Very High:</strong> same habitat only</li>'
+        '<li><strong>High:</strong> same habitat only</li>'
+        '<li><strong>Medium:</strong> same broad group; distinctiveness ≥ Medium</li>'
+        '<li><strong>Low:</strong> same or better (≥); remaining Low applied to Headline</li>'
+        '</ul></div>',
+        unsafe_allow_html=True
+    )
 
 if not file:
     st.info("Upload a Metric workbook to begin.")
@@ -768,10 +922,10 @@ tabs = st.tabs(["Area Habitats", "Hedgerows", "Watercourses", "Exports"])
 
 # ---------- AREA ----------
 with tabs[0]:
-    st.subheader("Trading Summary — Area Habitats")
     if area_norm.empty:
         st.warning("No Area Habitats trading summary detected.")
     else:
+        st.markdown('<div class="section-header">📊 Analysis Results</div>', unsafe_allow_html=True)
         st.caption(f"Source sheet: `{area_sheet or 'not found'}`")
 
         # 1) On-site offsets between habitats (flows)
@@ -875,26 +1029,17 @@ with tabs[0]:
             remaining_ng_to_quote=remaining_ng_to_quote,
             ng_flow_rows=ng_flow_rows
         )
-        st.markdown(
-            '<div class="explain-card"><h4>What this app just did (in plain English)</h4><p>We read the Metric and applied the trading rules; here’s exactly how units moved:</p>'
-            + explain_md.replace("\n","<br/>") +
-            f'<p class="explain-kv">Key numbers: <code>headline={0.0 if headline_def is None else float(headline_def):.4f}</code>, '
-            f'<code>low_used={float(applied_low_to_headline or 0.0):.4f}</code>, '
-            f'<code>headline_after_low={0.0 if residual_headline_after_low is None else float(residual_headline_after_low):.4f}</code>, '
-            f'<code>habitat_unmet={sum_habitat_residuals:.4f}</code>, '
-            f'<code>ng_remainder={float(remaining_ng_to_quote or 0.0):.4f}</code>'
-            + (f', <code>overall_surplus={overall_surplus_after_all:.4f}</code>' if overflow_happened else '') +
-            "</p></div>",
-            unsafe_allow_html=True
-        )
-        with st.expander("📊 Sankey — Requirements (left) → Surpluses (right) → Total Net Gain", expanded=False):
+        # Reorder: Show visual diagram first, then detailed calculations
+        st.markdown('<div class="spacer-small"></div>', unsafe_allow_html=True)
+        with st.expander("📊 Visual Flow Diagram — Requirements → Surpluses → Total Net Gain", expanded=True):
+            st.caption("Interactive Sankey diagram showing how deficit requirements are matched with surplus habitats")
             sankey_fig = build_sankey_requirements_left(
                 flows_matrix=flows_matrix,
                 residual_table=residual_table,
                 remaining_ng_to_quote=remaining_ng_to_quote,
                 deficit_table=alloc["deficits"],
-                height=380,            # <= compact height
-                compact_nodes=True,    # force compact
+                height=450,
+                compact_nodes=True,
                 show_zebra=True
             )
             st.plotly_chart(
@@ -903,13 +1048,24 @@ with tabs[0]:
                 theme="streamlit",
                 config={"displayModeBar": False, "responsive": True}
             )
-
         
-                                
-
-
+        st.markdown('<div class="spacer-small"></div>', unsafe_allow_html=True)
+        with st.expander("🧮 Detailed Calculation Methodology", expanded=False):
+            st.markdown(
+                '<div class="explain-card"><h4>How the calculations work</h4><p>We read the Metric and applied the trading rules. Here is exactly how units moved:</p>'
+                + explain_md.replace("\n","<br/>") +
+                f'<p class="explain-kv">Key numbers: <code>headline={0.0 if headline_def is None else float(headline_def):.4f}</code>, '
+                f'<code>low_used={float(applied_low_to_headline or 0.0):.4f}</code>, '
+                f'<code>headline_after_low={0.0 if residual_headline_after_low is None else float(residual_headline_after_low):.4f}</code>, '
+                f'<code>habitat_unmet={sum_habitat_residuals:.4f}</code>, '
+                f'<code>ng_remainder={float(remaining_ng_to_quote or 0.0):.4f}</code>'
+                + (f', <code>overall_surplus={overall_surplus_after_all:.4f}</code>' if overflow_happened else '') +
+                "</p></div>",
+                unsafe_allow_html=True
+            )
         
-        # ---------- HERO CARD ----------
+        st.markdown('<div class="spacer-medium"></div>', unsafe_allow_html=True)
+        st.markdown('<div class="section-header">🎯 Key Results</div>', unsafe_allow_html=True)
         st.markdown('<div class="hero-card">', unsafe_allow_html=True)
         st.markdown(
             '<div class="hero-title">🧮 Still needs mitigation OFF-SITE (after offsets + Low→Headline)</div>'
@@ -957,7 +1113,11 @@ with tabs[0]:
         # Save for Exports
         st.session_state["combined_residual_area"] = combined_residual
 
-        # ---------- Expanders ----------
+        # ---------- Detailed Analysis ----------
+        st.markdown('<div class="spacer-medium"></div>', unsafe_allow_html=True)
+        st.markdown('<div class="section-header">📋 Detailed Analysis</div>', unsafe_allow_html=True)
+        st.caption("Explore the underlying data tables and calculations")
+        
         with st.expander("🔗 Eligibility matrix (mitigation flows — includes Low→Headline)", expanded=False):
             if flows_matrix.empty:
                 st.info("No flows recorded.")
@@ -996,27 +1156,32 @@ with tabs[0]:
 
 # ---------- HEDGEROWS ----------
 with tabs[1]:
-    st.subheader("Hedgerows")
     if hedge_norm.empty:
         st.info("No Hedgerows trading summary detected.")
     else:
+        st.markdown('<div class="section-header">🌳 Hedgerows Analysis</div>', unsafe_allow_html=True)
+        st.caption(f"Source sheet: `{hedge_sheet or 'not found'}`")
+        st.markdown('<div class="spacer-small"></div>', unsafe_allow_html=True)
         with st.expander("📋 Normalised table — Hedgerows", expanded=True):
-            st.caption(f"Source sheet: `{hedge_sheet or 'not found'}`")
             st.dataframe(hedge_norm, use_container_width=True, height=480)
 
 # ---------- WATERCOURSES ----------
 with tabs[2]:
-    st.subheader("Watercourses")
     if water_norm.empty:
         st.info("No Watercourses trading summary detected.")
     else:
+        st.markdown('<div class="section-header">💧 Watercourses Analysis</div>', unsafe_allow_html=True)
+        st.caption(f"Source sheet: `{water_sheet or 'not found'}`")
+        st.markdown('<div class="spacer-small"></div>', unsafe_allow_html=True)
         with st.expander("📋 Normalised table — Watercourses", expanded=True):
-            st.caption(f"Source sheet: `{water_sheet or 'not found'}`")
             st.dataframe(water_norm, use_container_width=True, height=480)
 
 # ---------- EXPORTS ----------
 with tabs[3]:
-    st.subheader("Exports")
+    st.markdown('<div class="section-header">📦 Export Data</div>', unsafe_allow_html=True)
+    st.caption("Download analysis results in CSV or JSON format for further use")
+    st.markdown('<div class="spacer-small"></div>', unsafe_allow_html=True)
+    
     norm_concat = pd.concat(
         [df for df in [area_norm, hedge_norm, water_norm] if not df.empty],
         ignore_index=True
