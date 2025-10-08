@@ -728,24 +728,24 @@ def build_sankey_requirements_left(
 
     # Distinctiveness slices (VH..Low..Net Gain)
     for band, xcenter in data_band_to_x.items():
-        # requirements (left side of slice)
-        left_x = xcenter - 0.035
-        reqs = req_nodes_by_band.get(band, [])
-        req_ys = _even_y(len(reqs), offset=0.0 if band != "Net Gain" else -0.06)
-        for i, lab in enumerate(reqs):
-            labels.append(lab); colors.append(_rgb(band)); xs.append(left_x); ys.append(req_ys[i])
-            idx[lab] = len(labels) - 1
-        # surpluses (right side of slice)
-        # Same-group surpluses positioned closer to left (nearer to requirements)
+        # surpluses (left side of slice) - these provide mitigation
+        # Same-group surpluses positioned closer to center for cleaner flow
         surs = sur_nodes_by_band.get(band, [])
         sur_ys = _even_y(len(surs), offset=0.0 if band != "Low" else -0.03)
         for i, lab in enumerate(surs):
-            # Same-group mitigation: position closer to requirements (more to the left)
+            # Same-group mitigation: position closer to center for shorter flows
             if lab in same_group_surpluses:
-                x_pos = xcenter + 0.015  # closer to center (left)
+                x_pos = xcenter - 0.015  # closer to center (right)
             else:
-                x_pos = xcenter + 0.045  # further right
+                x_pos = xcenter - 0.045  # further left
             labels.append(lab); colors.append(_rgb(band)); xs.append(x_pos); ys.append(sur_ys[i])
+            idx[lab] = len(labels) - 1
+        # requirements/deficits (right side of slice) - these need mitigation
+        right_x = xcenter + 0.035
+        reqs = req_nodes_by_band.get(band, [])
+        req_ys = _even_y(len(reqs), offset=0.0 if band != "Net Gain" else -0.06)
+        for i, lab in enumerate(reqs):
+            labels.append(lab); colors.append(_rgb(band)); xs.append(right_x); ys.append(req_ys[i])
             idx[lab] = len(labels) - 1
 
     # Total NG sink (far right)
@@ -792,21 +792,13 @@ def build_sankey_requirements_left(
         values.append(float(remaining_ng_to_quote)); lcolors.append(_rgba("Net Gain", 0.85))
     
     # Surplus leftovers → Total NG
-    # Calculate how much of each surplus was used
+    # The surplus_remaining_units already has habitat offsets deducted
     if surplus_detail is not None and not surplus_detail.empty:
-        surplus_used = f.groupby(["surplus_habitat", "surplus_band"], dropna=False)["units_transferred"].sum().reset_index()
         for _, s in surplus_detail.iterrows():
             s_lab = f"S: {clean_text(s['habitat'])}"
             if s_lab not in idx:
                 continue
-            # Find how much was used
-            s_hab = clean_text(s['habitat'])
             s_band = str(s['distinctiveness'])
-            used = surplus_used[
-                (surplus_used['surplus_habitat'] == s_hab) & 
-                (surplus_used['surplus_band'] == s_band)
-            ]['units_transferred'].sum() if not surplus_used.empty else 0.0
-            
             remaining = float(s.get('surplus_remaining_units', 0.0))
             # If there's leftover surplus, create flow to Total NG
             if remaining > min_link:
@@ -881,9 +873,9 @@ def build_sankey_requirements_left(
 
         fig.update_layout(shapes=shapes, annotations=annotations)
 
-    # Tight margins so it fits the expander; no autosizing creep
+    # Add padding for better readability
     fig.update_layout(
-        margin=dict(l=10, r=10, t=32 if show_zebra else 10, b=10),
+        margin=dict(l=10, r=10, t=40 if show_zebra else 20, b=25),
         height=max(400, height),
         autosize=False,
         width=None  # Let container width control this
