@@ -817,11 +817,12 @@ def build_sankey_requirements_left(
     net_requirement = remaining_ng_to_quote or 0.0
     headline_requirement = net_requirement + total_surplus  # GROSS 10% baseline
     
-    # Headline → Total NG (full 10% requirement flows out; surpluses flow in)
-    # The node value will be headline_requirement (the FULL 10% baseline)
-    if headline_requirement > min_link and (headline_left in idx):
+    # Headline → Total NG: Only NET requirement flows out (after surpluses deducted)
+    # Surpluses flow IN, so the node shows FULL 10% but only NET flows OUT
+    # Example: 10% = 10 units, surplus = 3 units → node shows 10, but only 7 flows out
+    if net_requirement > min_link and (headline_left in idx):
         sources.append(idx[headline_left]); targets.append(idx[total_ng])
-        values.append(headline_requirement); lcolors.append(_rgba("Net Gain", 0.85))
+        values.append(net_requirement); lcolors.append(_rgba("Net Gain", 0.85))
     
     # Note: If surpluses exceed what's needed, remaining_ng_to_quote would be 0
     # So headline_requirement = 0 + total_surplus, showing the surplus amount
