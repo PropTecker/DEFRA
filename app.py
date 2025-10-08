@@ -634,6 +634,7 @@ def build_sankey_requirements_left(
     residual_table: pd.DataFrame | None,
     remaining_ng_to_quote: float | None,
     deficit_table: pd.DataFrame,
+    surplus_detail: pd.DataFrame | None = None,
     min_link: float = 1e-4,
     height: int = 400,          # was 560
     compact_nodes: bool = True, # default to compact
@@ -789,6 +790,28 @@ def build_sankey_requirements_left(
     if (remaining_ng_to_quote or 0.0) > min_link and (headline_left in idx):
         sources.append(idx[headline_left]); targets.append(idx[total_ng])
         values.append(float(remaining_ng_to_quote)); lcolors.append(_rgba("Net Gain", 0.85))
+    
+    # Surplus leftovers → Total NG
+    # Calculate how much of each surplus was used
+    if surplus_detail is not None and not surplus_detail.empty:
+        surplus_used = f.groupby(["surplus_habitat", "surplus_band"], dropna=False)["units_transferred"].sum().reset_index()
+        for _, s in surplus_detail.iterrows():
+            s_lab = f"S: {clean_text(s['habitat'])}"
+            if s_lab not in idx:
+                continue
+            # Find how much was used
+            s_hab = clean_text(s['habitat'])
+            s_band = str(s['distinctiveness'])
+            used = surplus_used[
+                (surplus_used['surplus_habitat'] == s_hab) & 
+                (surplus_used['surplus_band'] == s_band)
+            ]['units_transferred'].sum() if not surplus_used.empty else 0.0
+            
+            remaining = float(s.get('surplus_remaining_units', 0.0))
+            # If there's leftover surplus, create flow to Total NG
+            if remaining > min_link:
+                sources.append(idx[s_lab]); targets.append(idx[total_ng])
+                values.append(remaining); lcolors.append(_rgba(s_band, 0.5))
 
     # If no links, show friendly placeholder
     if not values:
@@ -911,7 +934,8 @@ except Exception as e:
     st.stop()
 
 st.success("Workbook loaded.")
-st.write("**Sheets detected:**", xls.sheet_names)
+with st.expander("📋 Sheets detected", expanded=False):
+    st.write(xls.sheet_names)
 
 AREA_SHEETS = [
     "Trading Summary Area Habitats",
@@ -991,6 +1015,18 @@ with tabs[0]:
             ignore_index=True
         ) if ng_flow_rows else alloc["allocation_flows"].copy()
 
+        # Update surplus_detail to reflect Low units used for Headline
+        surplus_detail_for_sankey = surplus_detail.copy()
+        if applied_low_to_headline and applied_low_to_headline > 0:
+            # Subtract the Low units used for Headline from the detail table
+            for ng_row in ng_flow_rows:
+                mask = (surplus_detail_for_sankey["habitat"] == ng_row["surplus_habitat"]) & \
+                       (surplus_detail_for_sankey["distinctiveness"] == ng_row["surplus_band"])
+                if mask.any():
+                    surplus_detail_for_sankey.loc[mask, "surplus_remaining_units"] = (
+                        surplus_detail_for_sankey.loc[mask, "surplus_remaining_units"] - ng_row["units_transferred"]
+                    ).clip(lower=0)
+        
         # Surplus remaining by band (after subtracting what we used for Headline from Low)
         surplus_by_band = alloc["surplus_remaining_by_band"].copy()
         if applied_low_to_headline and applied_low_to_headline > 0:
@@ -1056,6 +1092,7 @@ with tabs[0]:
                 residual_table=residual_table,
                 remaining_ng_to_quote=remaining_ng_to_quote,
                 deficit_table=alloc["deficits"],
+                surplus_detail=surplus_detail_for_sankey,
                 height=450,
                 compact_nodes=True,
                 show_zebra=True
