@@ -792,15 +792,18 @@ def build_sankey_requirements_left(
         values.append(float(remaining_ng_to_quote)); lcolors.append(_rgba("Net Gain", 0.85))
     
     # Surplus leftovers → Total NG
-    # The surplus_remaining_units already has habitat offsets deducted
+    # The surplus_remaining_units already has habitat offsets and Low→Headline deducted
     if surplus_detail is not None and not surplus_detail.empty:
+        # Only create flows for surpluses that exist as nodes AND have remaining units
         for _, s in surplus_detail.iterrows():
-            s_lab = f"S: {clean_text(s['habitat'])}"
+            s_hab = clean_text(s['habitat'])
+            s_lab = f"S: {s_hab}"
+            # Skip if node doesn't exist or no remaining units
             if s_lab not in idx:
                 continue
             s_band = str(s['distinctiveness'])
             remaining = float(s.get('surplus_remaining_units', 0.0))
-            # If there's leftover surplus, create flow to Total NG
+            # Only create flow if there's actual leftover (stricter check)
             if remaining > min_link:
                 sources.append(idx[s_lab]); targets.append(idx[total_ng])
                 values.append(remaining); lcolors.append(_rgba(s_band, 0.5))
@@ -873,9 +876,9 @@ def build_sankey_requirements_left(
 
         fig.update_layout(shapes=shapes, annotations=annotations)
 
-    # Add padding for better readability
+    # Maintain consistent spacing without creating white boxes
     fig.update_layout(
-        margin=dict(l=10, r=10, t=40 if show_zebra else 20, b=25),
+        margin=dict(l=10, r=10, t=32 if show_zebra else 10, b=10),
         height=max(400, height),
         autosize=False,
         width=None  # Let container width control this
@@ -1012,7 +1015,8 @@ with tabs[0]:
         if applied_low_to_headline and applied_low_to_headline > 0:
             # Subtract the Low units used for Headline from the detail table
             for ng_row in ng_flow_rows:
-                mask = (surplus_detail_for_sankey["habitat"] == ng_row["surplus_habitat"]) & \
+                # Use clean_text for proper matching
+                mask = (surplus_detail_for_sankey["habitat"].apply(clean_text) == ng_row["surplus_habitat"]) & \
                        (surplus_detail_for_sankey["distinctiveness"] == ng_row["surplus_band"])
                 if mask.any():
                     surplus_detail_for_sankey.loc[mask, "surplus_remaining_units"] = (
@@ -1085,7 +1089,7 @@ with tabs[0]:
                 remaining_ng_to_quote=remaining_ng_to_quote,
                 deficit_table=alloc["deficits"],
                 surplus_detail=surplus_detail_for_sankey,
-                height=450,
+                height=500,
                 compact_nodes=True,
                 show_zebra=True
             )
