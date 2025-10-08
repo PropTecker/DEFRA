@@ -774,57 +774,43 @@ def build_sankey_requirements_left(
             sources.append(idx[d_lab]); targets.append(idx[total_ng]); values.append(residual)
             lcolors.append("rgba(120,120,120,0.6)")
 
-    # Low surplus → Headline (applied to reduce Headline requirement)
+    # Calculate total surplus available (Low→Headline + other surpluses)
     low_to_head = f[
         (f["deficit_habitat"].astype(str).str.strip().str.lower() == "net gain uplift (headline)")
         & (f["units_transferred"] > min_link)
     ]
-    for _, rr in low_to_head.iterrows():
-        s_lab = f"S: {rr['surplus_habitat']}"
-        if (headline_left in idx) and (s_lab in idx):
-            amt = float(rr["units_transferred"])
-            # Flow FROM surplus TO Headline (surplus reduces Headline requirement)
-            sources.append(idx[s_lab]); targets.append(idx[headline_left]); values.append(amt)
-            lcolors.append(_rgba("Low", 0.78))
+    total_low_to_headline = float(low_to_head["units_transferred"].sum()) if not low_to_head.empty else 0.0
     
-    # Other surplus leftovers → Headline (further reduce Headline requirement)
-    # Calculate total surplus available and apply to Headline
-    total_surplus_to_headline = 0.0
+    total_other_surplus = 0.0
     if surplus_detail is not None and not surplus_detail.empty:
         for _, s in surplus_detail.iterrows():
             s_hab = clean_text(s['habitat'])
             s_lab = f"S: {s_hab}"
-            # Only process if this surplus is actually a node in the diagram
-            if s_lab not in idx:
-                continue
-            
-            s_band = str(s['distinctiveness'])
-            remaining = float(s.get('surplus_remaining_units', 0.0))
-            
-            # Flow surplus TO Headline to reduce what needs to be sourced
-            if remaining > min_link:
-                sources.append(idx[s_lab]); targets.append(idx[headline_left]); values.append(remaining)
-                lcolors.append(_rgba(s_band, 0.5))
-                total_surplus_to_headline += remaining
+            # Only count if this surplus is actually a node in the diagram
+            if s_lab in idx:
+                remaining = float(s.get('surplus_remaining_units', 0.0))
+                if remaining > min_link:
+                    total_other_surplus += remaining
     
-    # Calculate net Headline requirement after all surpluses applied
+    total_surplus = total_low_to_headline + total_other_surplus
+    
+    # Headline node shows the 10% requirement value
     headline_requirement = remaining_ng_to_quote or 0.0
-    net_headline = headline_requirement - total_surplus_to_headline
     
-    # Headline remainder → Total NG (only what still needs to be sourced)
-    if net_headline > min_link and (headline_left in idx):
+    # Calculate net amount to source after surpluses
+    net_headline = max(0.0, headline_requirement - total_surplus)
+    
+    # Headline → Total NG (only net amount that still needs to be sourced)
+    if headline_requirement > min_link and (headline_left in idx):
         sources.append(idx[headline_left]); targets.append(idx[total_ng])
-        values.append(net_headline); lcolors.append(_rgba("Net Gain", 0.85))
+        values.append(headline_requirement); lcolors.append(_rgba("Net Gain", 0.85))
     
     # If surplus exceeds Headline requirement, show Overall Surplus node
-    overall_surplus = max(0.0, total_surplus_to_headline - headline_requirement)
+    overall_surplus = max(0.0, total_surplus - headline_requirement)
     if overall_surplus > min_link:
         overall_surplus_node = "Overall Surplus (above 10% requirement)"
         labels.append(overall_surplus_node); colors.append(_rgb("Net Gain")); xs.append(0.98); ys.append(0.08)
         idx[overall_surplus_node] = len(labels) - 1
-        # Flow from Headline to Overall Surplus
-        sources.append(idx[headline_left]); targets.append(idx[overall_surplus_node])
-        values.append(overall_surplus); lcolors.append(_rgba("Net Gain", 0.6))
 
     # If no links, show friendly placeholder
     if not values:
