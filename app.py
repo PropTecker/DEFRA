@@ -774,7 +774,7 @@ def build_sankey_requirements_left(
             sources.append(idx[d_lab]); targets.append(idx[total_ng]); values.append(residual)
             lcolors.append("rgba(120,120,120,0.6)")
 
-    # Headline → Low surplus (applied)
+    # Low surplus → Headline (applied to reduce Headline requirement)
     low_to_head = f[
         (f["deficit_habitat"].astype(str).str.strip().str.lower() == "net gain uplift (headline)")
         & (f["units_transferred"] > min_link)
@@ -783,19 +783,14 @@ def build_sankey_requirements_left(
         s_lab = f"S: {rr['surplus_habitat']}"
         if (headline_left in idx) and (s_lab in idx):
             amt = float(rr["units_transferred"])
-            sources.append(idx[headline_left]); targets.append(idx[s_lab]); values.append(amt)
+            # Flow FROM surplus TO Headline (surplus reduces Headline requirement)
+            sources.append(idx[s_lab]); targets.append(idx[headline_left]); values.append(amt)
             lcolors.append(_rgba("Low", 0.78))
-
-    # Headline remainder → Total NG
-    if (remaining_ng_to_quote or 0.0) > min_link and (headline_left in idx):
-        sources.append(idx[headline_left]); targets.append(idx[total_ng])
-        values.append(float(remaining_ng_to_quote)); lcolors.append(_rgba("Net Gain", 0.85))
     
-    # Surplus leftovers → Total NG
-    # Use the surplus_remaining_units from input, which should have all deductions
-    # But ONLY if this surplus node exists and hasn't sent out all its units
+    # Other surplus leftovers → Headline (further reduce Headline requirement)
+    # Calculate total surplus available and apply to Headline
+    total_surplus_to_headline = 0.0
     if surplus_detail is not None and not surplus_detail.empty:
-        # For surpluses that exist as nodes, use the remaining units from surplus_detail
         for _, s in surplus_detail.iterrows():
             s_hab = clean_text(s['habitat'])
             s_lab = f"S: {s_hab}"
@@ -806,11 +801,30 @@ def build_sankey_requirements_left(
             s_band = str(s['distinctiveness'])
             remaining = float(s.get('surplus_remaining_units', 0.0))
             
-            # Only create flow to Total NG if there's truly leftover units
-            # The remaining value should already have habitat→habitat and Low→Headline deducted
+            # Flow surplus TO Headline to reduce what needs to be sourced
             if remaining > min_link:
-                sources.append(idx[s_lab]); targets.append(idx[total_ng])
-                values.append(remaining); lcolors.append(_rgba(s_band, 0.5))
+                sources.append(idx[s_lab]); targets.append(idx[headline_left]); values.append(remaining)
+                lcolors.append(_rgba(s_band, 0.5))
+                total_surplus_to_headline += remaining
+    
+    # Calculate net Headline requirement after all surpluses applied
+    headline_requirement = remaining_ng_to_quote or 0.0
+    net_headline = headline_requirement - total_surplus_to_headline
+    
+    # Headline remainder → Total NG (only what still needs to be sourced)
+    if net_headline > min_link and (headline_left in idx):
+        sources.append(idx[headline_left]); targets.append(idx[total_ng])
+        values.append(net_headline); lcolors.append(_rgba("Net Gain", 0.85))
+    
+    # If surplus exceeds Headline requirement, show Overall Surplus node
+    overall_surplus = max(0.0, total_surplus_to_headline - headline_requirement)
+    if overall_surplus > min_link:
+        overall_surplus_node = "Overall Surplus (above 10% requirement)"
+        labels.append(overall_surplus_node); colors.append(_rgb("Net Gain")); xs.append(0.98); ys.append(0.08)
+        idx[overall_surplus_node] = len(labels) - 1
+        # Flow from Headline to Overall Surplus
+        sources.append(idx[headline_left]); targets.append(idx[overall_surplus_node])
+        values.append(overall_surplus); lcolors.append(_rgba("Net Gain", 0.6))
 
     # If no links, show friendly placeholder
     if not values:
