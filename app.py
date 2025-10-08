@@ -631,18 +631,18 @@ def build_sankey_requirements_left(
         sources.append(idx[headline_left]); targets.append(idx[total_ng])
         values.append(float(remaining_ng_to_quote)); lcolors.append(_rgba("Net Gain", 0.85))
 
-    # Empty? friendly fig
+    # If no links, show friendly placeholder
     if not values:
         fig = go.Figure()
-        fig.update_layout(margin=dict(l=10, r=10, t=10, b=10), height=max(380, height))
+        fig.update_layout(margin=dict(l=6, r=6, t=10, b=6), height=max(380, height))
         fig.add_annotation(text="No flows to display", showarrow=False, x=0.5, y=0.5, xref="paper", yref="paper")
         return fig
 
-    # Node cosmetics
+    # Node cosmetics (slimmer when compact)
     node_kwargs = dict(
-        pad=12 if compact_nodes else 15,
-        thickness=16 if compact_nodes else 20,
-        line=dict(width=0.5, color="rgba(120,120,120,0.3)"),
+        pad=10 if compact_nodes else 14,
+        thickness=14 if compact_nodes else 18,
+        line=dict(width=0.5, color="rgba(120,120,120,0.25)"),
         label=labels, color=colors, x=xs, y=ys
     )
 
@@ -652,41 +652,63 @@ def build_sankey_requirements_left(
         link=dict(source=sources, target=targets, value=values, color=lcolors)
     )])
 
-    # Zebra background & headers
+    # ---------------- Zebra stripes that actually line up ----------------
     if show_zebra:
-        xs_vis = _band_xpos_visual()
-        stripes = [
-            ("Headline",        0.07, 0.11),  # narrow left
-            ("Very High",       0.12, 0.18),
-            ("High",            0.20, 0.26),
-            ("Medium",          0.28, 0.34),
-            ("Low",             0.36, 0.42),
-            ("Total Net Gain",  0.86, 0.94)   # right sink area
-        ]
-        shapes = []
-        for i, (label, x0, x1) in enumerate(stripes):
-            fill = "rgba(0,0,0,0.06)" if i % 2 == 0 else "rgba(0,0,0,0.10)"
-            shapes.append(dict(type="rect", xref="paper", yref="paper",
-                               x0=x0, x1=x1, y0=0, y1=1,
-                               layer="below", line=dict(width=0), fillcolor=fill))
-        fig.update_layout(shapes=shapes)
-        # Headers (top annotations)
-        headers = [
-            ("Headline", xs_vis["Headline"], 0.995),
-            ("Very High", xs_vis["Very High"], 0.995),
-            ("High", xs_vis["High"], 0.995),
-            ("Medium", xs_vis["Medium"], 0.995),
-            ("Low", xs_vis["Low"], 0.995),
-            ("Total Net Gain", xs_vis["Total NG"], 0.995)
-        ]
-        fig.update_layout(annotations=[
-            dict(text=f"<b>{t}</b>", x=x, y=y, xref="paper", yref="paper",
-                 showarrow=False, font=dict(size=12))
-            for (t, x, y) in headers
-        ])
+        # Visual columns (left→right): Headline, VH, High, Medium, Low, Total NG
+        visual_labels = ["Headline", "Very High", "High", "Medium", "Low", "Total Net Gain"]
 
-    fig.update_layout(margin=dict(l=10, r=10, t=38 if show_zebra else 10, b=10),
-                      height=max(420, height))
+        # Compute centres equally spaced across paper coords [0.06..0.94]
+        ncols = len(visual_labels)
+        x0_all = 0.06
+        x1_all = 0.94
+        step = (x1_all - x0_all) / (ncols - 1)
+        centres = [x0_all + i * step for i in range(ncols)]
+
+        # Convert centres to stripe boundaries halfway to neighbours
+        # First and last stripes get a small padding so they don't touch edges
+        pad_edge = 0.01
+        bounds = []
+        for i, c in enumerate(centres):
+            if i == 0:
+                left = max(0.0, c - step/2 - pad_edge)
+            else:
+                left = (centres[i-1] + c) / 2.0
+            if i == ncols - 1:
+                right = min(1.0, c + step/2 + pad_edge)
+            else:
+                right = (c + centres[i+1]) / 2.0
+            bounds.append((left, right))
+
+        # Build alternating “zebra” rectangles and headers
+        shapes = []
+        annotations = []
+        for i, (lab, (x0b, x1b), xc) in enumerate(zip(visual_labels, bounds, centres)):
+            fill = "rgba(0,0,0,0.05)" if i % 2 == 0 else "rgba(0,0,0,0.09)"
+            shapes.append(dict(
+                type="rect", xref="paper", yref="paper",
+                x0=x0b, x1=x1b, y0=0.0, y1=1.0,
+                layer="below", line=dict(width=0), fillcolor=fill
+            ))
+            annotations.append(dict(
+                text=f"<b>{lab}</b>",
+                x=xc, y=0.995, xref="paper", yref="paper",
+                showarrow=False, yanchor="top",
+                font=dict(size=12)
+            ))
+
+        fig.update_layout(shapes=shapes, annotations=annotations)
+
+    # Tight margins so it fits the expander; no autosizing creep
+    fig.update_layout(
+        margin=dict(l=6, r=6, t=34 if show_zebra else 8, b=6),
+        height=max(420, height)
+    )
+
+    # Prevent Plotly from expanding beyond container width
+    fig.update_layout(
+        autosize=False
+    )
+
     return fig
 
 
@@ -868,7 +890,7 @@ with tabs[0]:
             unsafe_allow_html=True
         )
         with st.expander("📊 Sankey — Requirements (left) → Surpluses (right) → Total Net Gain", expanded=False):
-            compact = st.toggle("Compact view", value=True, help="Slimmer nodes and tighter spacing")
+            compact = st.toggle("Compact view", value=True)
             sankey_fig = build_sankey_requirements_left(
                 flows_matrix=flows_matrix,
                 residual_table=residual_table,
@@ -882,9 +904,10 @@ with tabs[0]:
                 sankey_fig,
                 use_container_width=True,
                 theme="streamlit",
-                config={"displayModeBar": False, "responsive": True}
+                config={"displayModeBar": False, "responsive": True, "staticPlot": False}
             )
-                        
+        
+                                
 
 
         
