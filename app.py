@@ -455,6 +455,7 @@ def build_area_explanation(
     return "\n".join(lines)
 
 # ---------- Banded Sankey: Requirements (left) → Surpluses (right) → Total Net Gain (far right) ----------
+# ---------- Banded Sankey: Requirements (left) → Surpluses (right) → Total Net Gain (far right)
 import plotly.graph_objects as go
 
 _BAND_RGB = {
@@ -465,147 +466,137 @@ _BAND_RGB = {
     "Net Gain":  (69, 90, 100),
     "Other":     (120, 120, 120),
 }
-BAND_ORDER = ["Very High", "High", "Medium", "Low", "Net Gain"]
+BAND_ORDER = ["Headline", "Very High", "High", "Medium", "Low", "Total NG"]  # for headers, visual only
 
-def _rgb(band: str) -> str:
-    r,g,b = _BAND_RGB.get(str(band), _BAND_RGB["Other"])
-    return f"rgb({r},{g},{b})"
+def _rgb_triplet(band):
+    return _BAND_RGB.get(str(band), _BAND_RGB["Other"])
 
-def _rgba(band: str, a: float = 0.68) -> str:
-    r,g,b = _BAND_RGB.get(str(band), _BAND_RGB["Other"])
-    a = min(max(a, 0.0), 1.0)
-    return f"rgba({r},{g},{b},{a})"
+def _rgb(band):  r,g,b = _rgb_triplet(band); return f"rgb({r},{g},{b})"
+def _rgba(band,a=.68): r,g,b=_rgb_triplet(band); return f"rgba({r},{g},{b},{min(max(a,0),1)})"
 
-def _band_xpos() -> dict:
-    # even spacing across 0.06..0.94 for the 5 slices (VH..NG). Left slice holds requirements, right slice holds surpluses.
-    return {b: 0.06 + i*(0.88/(len(BAND_ORDER)-1)) for i,b in enumerate(BAND_ORDER)}
+def _band_xpos_visual():
+    # Even spacing across 0.06..0.94 for 6 “visual” columns (Headline, VH, High, Medium, Low, Total NG)
+    cols = BAND_ORDER
+    return {b: 0.06 + i*(0.88/(len(cols)-1)) for i,b in enumerate(cols)}
 
-def _even_y(n: int, offset: float = 0.0) -> list[float]:
-    if n <= 0: return []
-    ys = [i/(n+1) for i in range(1, n+1)]
+def _even_y(n, offset=0.0):
+    if n<=0: return []
+    ys=[i/(n+1) for i in range(1,n+1)]
     return [min(max(y+offset, 0.03), 0.97) for y in ys]
 
 def build_sankey_requirements_left(
-    flows_matrix: pd.DataFrame,          # includes habitat→habitat AND low→headline (we’ll use both)
-    residual_table: pd.DataFrame | None, # alloc["residual_off_site"] (optional, tightens residual amounts)
-    remaining_ng_to_quote: float | None, # Headline remainder (>0 flows to Total NG pool)
-    deficit_table: pd.DataFrame,         # alloc["deficits"] (original needs: negative project_wide_change)
-    min_link: float = 1e-4
+    flows_matrix: pd.DataFrame,
+    residual_table: pd.DataFrame | None,
+    remaining_ng_to_quote: float | None,
+    deficit_table: pd.DataFrame,
+    min_link: float = 1e-4,
+    height: int = 560,                 # ← tweakable
+    compact_nodes: bool = True,        # ← slimmer nodes in compact mode
+    show_zebra: bool = True            # ← draw zebra bands + headers
 ) -> go.Figure:
-    """
-    Left nodes: all deficit habitats + a left 'D: Headline 10% requirement' node.
-    Right nodes: all surplus habitats (grouped by band slice).
-    Far-right: ONE pooled sink 'Total Net Gain (to source)'.
-
-    Links:
-      - Deficit habitat → Surplus habitat (units_transferred, colored by SURPLUS band).
-      - Deficit habitat → Total NG (the unmet residual from that habitat).
-      - Headline 10% → Low surplus nodes (applied_low flows), Headline remainder → Total NG.
-    """
-    # --- Prepare coverage per deficit habitat ---
+    # ----- (all your existing data-prep code stays the same) -----
     f = flows_matrix.copy() if flows_matrix is not None else pd.DataFrame()
     f["units_transferred"] = pd.to_numeric(f.get("units_transferred"), errors="coerce").fillna(0.0)
 
-    # Sum coverage received by each deficit (this includes habitat→habitat AND low→headline rows)
     cov = (
         f.groupby(["deficit_habitat","deficit_band"], dropna=False)["units_transferred"]
          .sum().reset_index().rename(columns={"units_transferred":"covered_units"})
     )
 
-    # Original need per habitat deficit
     dtab = deficit_table.copy() if deficit_table is not None else pd.DataFrame(columns=["habitat","distinctiveness","project_wide_change"])
     dtab["need_units"] = pd.to_numeric(dtab["project_wide_change"], errors="coerce").abs()
-    need = dtab.groupby(["habitat","distinctiveness"], dropna=False)["need_units"].sum().reset_index()
-
-    # Merge need + covered → residual
-    per_def = need.merge(
-        cov, how="left",
-        left_on=["habitat","distinctiveness"],
-        right_on=["deficit_habitat","deficit_band"]
+    per_def = (
+        dtab.groupby(["habitat","distinctiveness"], dropna=False)["need_units"].sum().reset_index()
+        .merge(cov, how="left",
+               left_on=["habitat","distinctiveness"],
+               right_on=["deficit_habitat","deficit_band"])
     )
     per_def["covered_units"]  = pd.to_numeric(per_def["covered_units"], errors="coerce").fillna(0.0)
     per_def["residual_units"] = (per_def["need_units"] - per_def["covered_units"]).clip(lower=0.0)
 
-    # If we have the modelled residual table, prefer it (less rounding noise)
     residual_map = {}
     if residual_table is not None and not residual_table.empty:
         for _, row in residual_table.iterrows():
             residual_map[f"D: {row['habitat']}"] = float(pd.to_numeric(row["unmet_units_after_on_site_offset"], errors="coerce") or 0.0)
 
-    # --- Aggregate pairwise flows for clean links ---
     agg = (
         f.groupby(["deficit_habitat","deficit_band","surplus_habitat","surplus_band"], dropna=False)
          ["units_transferred"].sum().reset_index()
     )
     agg = agg[agg["units_transferred"] > min_link]
 
-    # --- Node layout: banded slices left→right (VH, High, Medium, Low, Net Gain) ---
-    bands_x = _band_xpos()
+    # ----- layout buckets -----
+    # “Real” bands for data: we still place nodes by distinctiveness slices VH, High, Medium, Low, Net Gain
+    data_band_to_x = {
+        "Very High": 0.06 + 1*(0.88/(6-1)),  # place VH in the 2nd visual slot
+        "High":      0.06 + 2*(0.88/(6-1)),
+        "Medium":    0.06 + 3*(0.88/(6-1)),
+        "Low":       0.06 + 4*(0.88/(6-1)),
+        "Net Gain":  0.06 + 5*(0.88/(6-1)),
+    }
+    # Headline gets its own left-most visual slot
+    headline_x = 0.06
 
-    # Left column: requirement (deficit) nodes in each band
-    req_nodes_by_band = {b: [] for b in BAND_ORDER}
-    # Right column: surplus nodes in each band
-    sur_nodes_by_band = {b: [] for b in BAND_ORDER}
+    req_nodes_by_band = {b: [] for b in ["Very High","High","Medium","Low","Net Gain"]}
+    sur_nodes_by_band = {b: [] for b in ["Very High","High","Medium","Low","Net Gain"]}
 
-    # Collect nodes from flows
     for _, r in agg.iterrows():
         d_lab = f"D: {r['deficit_habitat']}"
         s_lab = f"S: {r['surplus_habitat']}"
         d_band = str(r["deficit_band"]) if pd.notna(r["deficit_band"]) else "Other"
         s_band = str(r["surplus_band"]) if pd.notna(r["surplus_band"]) else "Other"
-        if d_band not in BAND_ORDER: d_band = "Other"
-        if s_band not in BAND_ORDER: s_band = "Other"
-        if d_lab not in req_nodes_by_band[d_band]:
+        if d_band not in req_nodes_by_band and d_band != "Net Gain":  # ignore “Other”
+            continue
+        if s_band not in sur_nodes_by_band and s_band != "Net Gain":
+            continue
+        if d_band in req_nodes_by_band and d_lab not in req_nodes_by_band[d_band]:
             req_nodes_by_band[d_band].append(d_lab)
-        if s_lab not in sur_nodes_by_band[s_band]:
+        if s_band in sur_nodes_by_band and s_lab not in sur_nodes_by_band[s_band]:
             sur_nodes_by_band[s_band].append(s_lab)
 
-    # Also add any deficit with zero coverage so it can still send its full need to Total NG
+    # add deficits with zero coverage
     for _, r in per_def.iterrows():
         d_lab = f"D: {r['habitat']}"
-        d_band = str(r["distinctiveness"]) if pd.notna(r["distinctiveness"]) else "Other"
-        if d_band not in BAND_ORDER: d_band = "Other"
-        if d_lab not in sum(req_nodes_by_band.values(), []):
+        d_band = str(r["distinctiveness"])
+        if d_band in req_nodes_by_band and d_lab not in sum(req_nodes_by_band.values(), []):
             req_nodes_by_band[d_band].append(d_lab)
 
-    # Ensure Headline left node exists (in NG slice)
+    # Always show Headline left node
     headline_left = "D: Headline 10% requirement"
-    # If there were explicit low→headline rows, we’ll see 'deficit_habitat' == "Net gain uplift (Headline)".
-    # Either way, we always want the Headline left node visible.
-    if headline_left not in req_nodes_by_band["Net Gain"]:
-        req_nodes_by_band["Net Gain"].insert(0, headline_left)
 
-    # Build node arrays
+    # ----- assemble nodes -----
     labels, colors, xs, ys, idx = [], [], [], [], {}
 
-    for band in BAND_ORDER:
-        x_center = bands_x[band]
+    # Headline (left-most)
+    labels.append(headline_left); colors.append(_rgb("Net Gain")); xs.append(headline_x - 0.02); ys.append(0.12)
+    idx[headline_left] = len(labels) - 1
 
-        # Left side of slice: requirement (deficit) nodes
-        left_x = x_center - 0.035
-        reqs = req_nodes_by_band[band]
+    # Distinctiveness slices (VH..Low..Net Gain)
+    for band, xcenter in data_band_to_x.items():
+        # requirements (left side of slice)
+        left_x = xcenter - 0.035
+        reqs = req_nodes_by_band.get(band, [])
         req_ys = _even_y(len(reqs), offset=0.0 if band != "Net Gain" else -0.06)
         for i, lab in enumerate(reqs):
             labels.append(lab); colors.append(_rgb(band)); xs.append(left_x); ys.append(req_ys[i])
             idx[lab] = len(labels) - 1
-
-        # Right side of slice: surplus nodes
-        right_x = x_center + 0.035
-        surs = sur_nodes_by_band[band]
+        # surpluses (right side of slice)
+        right_x = xcenter + 0.035
+        surs = sur_nodes_by_band.get(band, [])
         sur_ys = _even_y(len(surs), offset=0.0 if band != "Low" else -0.03)
         for i, lab in enumerate(surs):
             labels.append(lab); colors.append(_rgb(band)); xs.append(right_x); ys.append(sur_ys[i])
             idx[lab] = len(labels) - 1
 
-    # Far-right pooled sink
+    # Total NG sink (far right)
     total_ng = "Total Net Gain (to source)"
     labels.append(total_ng); colors.append(_rgb("Net Gain")); xs.append(0.98); ys.append(0.92)
     idx[total_ng] = len(labels) - 1
 
-    # --- Links ---
+    # ----- links -----
     sources, targets, values, lcolors = [], [], [], []
 
-    # (1) Deficit habitat → Surplus habitat (units transferred)
+    # Deficit → Surplus
     for _, r in agg.iterrows():
         d_lab = f"D: {r['deficit_habitat']}"
         s_lab = f"S: {r['surplus_habitat']}"
@@ -613,57 +604,90 @@ def build_sankey_requirements_left(
         if val <= min_link: continue
         if d_lab in idx and s_lab in idx:
             sources.append(idx[d_lab]); targets.append(idx[s_lab]); values.append(val)
-            lcolors.append(_rgba(str(r["surplus_band"]), 0.72))  # color by the paying band
+            lcolors.append(_rgba(str(r["surplus_band"]), 0.72))
 
-    # (2) For each deficit habitat, send its residual to the Total NG pool
+    # Each deficit’s unmet residual → Total NG
     for _, r in per_def.iterrows():
-        d_lab    = f"D: {r['habitat']}"
-        need     = float(r["need_units"])
-        covered  = float(r["covered_units"])
-        # Prefer residual_table’s value if we have it
+        d_lab = f"D: {r['habitat']}"
         residual = residual_map.get(d_lab, float(r["residual_units"]))
         if residual > min_link and d_lab in idx:
             sources.append(idx[d_lab]); targets.append(idx[total_ng]); values.append(residual)
             lcolors.append("rgba(120,120,120,0.6)")
 
-    # (3) Headline left node → (a) Low surplus nodes (applied), (b) Total NG pool (remainder)
-    # (a) detect Low→Headline flows from the flows matrix we already built (surplus_band == Low and deficit is 'Net gain uplift (Headline)')
-    if not f.empty:
-        low_to_head = f[
-            (f["deficit_habitat"].astype(str).str.strip().str.lower() == "net gain uplift (headline)")
-            & (f["units_transferred"] > min_link)
-        ]
-        for _, rr in low_to_head.iterrows():
-            s_lab = f"S: {rr['surplus_habitat']}"
-            if (headline_left in idx) and (s_lab in idx):
-                amt = float(rr["units_transferred"])
-                sources.append(idx[headline_left]); targets.append(idx[s_lab]); values.append(amt)
-                lcolors.append(_rgba("Low", 0.75))
+    # Headline → Low surplus (applied)
+    low_to_head = f[
+        (f["deficit_habitat"].astype(str).str.strip().str.lower() == "net gain uplift (headline)")
+        & (f["units_transferred"] > min_link)
+    ]
+    for _, rr in low_to_head.iterrows():
+        s_lab = f"S: {rr['surplus_habitat']}"
+        if (headline_left in idx) and (s_lab in idx):
+            amt = float(rr["units_transferred"])
+            sources.append(idx[headline_left]); targets.append(idx[s_lab]); values.append(amt)
+            lcolors.append(_rgba("Low", 0.78))
 
-    # (b) if there’s a Headline remainder, send it to the Total NG pool
+    # Headline remainder → Total NG
     if (remaining_ng_to_quote or 0.0) > min_link and (headline_left in idx):
-        sources.append(idx[headline_left]); targets.append(idx[total_ng]); values.append(float(remaining_ng_to_quote))
-        lcolors.append(_rgba("Net Gain", 0.85))
+        sources.append(idx[headline_left]); targets.append(idx[total_ng])
+        values.append(float(remaining_ng_to_quote)); lcolors.append(_rgba("Net Gain", 0.85))
 
-    # If no links, show friendly placeholder
+    # Empty? friendly fig
     if not values:
         fig = go.Figure()
-        fig.update_layout(margin=dict(l=10, r=10, t=10, b=10), height=420)
+        fig.update_layout(margin=dict(l=10, r=10, t=10, b=10), height=max(380, height))
         fig.add_annotation(text="No flows to display", showarrow=False, x=0.5, y=0.5, xref="paper", yref="paper")
         return fig
 
+    # Node cosmetics
+    node_kwargs = dict(
+        pad=12 if compact_nodes else 15,
+        thickness=16 if compact_nodes else 20,
+        line=dict(width=0.5, color="rgba(120,120,120,0.3)"),
+        label=labels, color=colors, x=xs, y=ys
+    )
+
     fig = go.Figure(data=[go.Sankey(
         arrangement="snap",
-        node=dict(
-            pad=15, thickness=20,
-            line=dict(width=0.5, color="rgba(120,120,120,0.3)"),
-            label=labels, color=colors, x=xs, y=ys
-        ),
+        node=node_kwargs,
         link=dict(source=sources, target=targets, value=values, color=lcolors)
     )])
-    fig.update_layout(margin=dict(l=10, r=10, t=10, b=10), height=640)
-    return fig
 
+    # Zebra background & headers
+    if show_zebra:
+        xs_vis = _band_xpos_visual()
+        stripes = [
+            ("Headline",        0.07, 0.11),  # narrow left
+            ("Very High",       0.12, 0.18),
+            ("High",            0.20, 0.26),
+            ("Medium",          0.28, 0.34),
+            ("Low",             0.36, 0.42),
+            ("Total Net Gain",  0.86, 0.94)   # right sink area
+        ]
+        shapes = []
+        for i, (label, x0, x1) in enumerate(stripes):
+            fill = "rgba(0,0,0,0.06)" if i % 2 == 0 else "rgba(0,0,0,0.10)"
+            shapes.append(dict(type="rect", xref="paper", yref="paper",
+                               x0=x0, x1=x1, y0=0, y1=1,
+                               layer="below", line=dict(width=0), fillcolor=fill))
+        fig.update_layout(shapes=shapes)
+        # Headers (top annotations)
+        headers = [
+            ("Headline", xs_vis["Headline"], 0.995),
+            ("Very High", xs_vis["Very High"], 0.995),
+            ("High", xs_vis["High"], 0.995),
+            ("Medium", xs_vis["Medium"], 0.995),
+            ("Low", xs_vis["Low"], 0.995),
+            ("Total Net Gain", xs_vis["Total NG"], 0.995)
+        ]
+        fig.update_layout(annotations=[
+            dict(text=f"<b>{t}</b>", x=x, y=y, xref="paper", yref="paper",
+                 showarrow=False, font=dict(size=12))
+            for (t, x, y) in headers
+        ])
+
+    fig.update_layout(margin=dict(l=10, r=10, t=38 if show_zebra else 10, b=10),
+                      height=max(420, height))
+    return fig
 
 
 
