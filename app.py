@@ -792,18 +792,22 @@ def build_sankey_requirements_left(
         values.append(float(remaining_ng_to_quote)); lcolors.append(_rgba("Net Gain", 0.85))
     
     # Surplus leftovers → Total NG
-    # The surplus_remaining_units already has habitat offsets and Low→Headline deducted
+    # Use the surplus_remaining_units from input, which should have all deductions
+    # But ONLY if this surplus node exists and hasn't sent out all its units
     if surplus_detail is not None and not surplus_detail.empty:
-        # Only create flows for surpluses that exist as nodes AND have remaining units
+        # For surpluses that exist as nodes, use the remaining units from surplus_detail
         for _, s in surplus_detail.iterrows():
             s_hab = clean_text(s['habitat'])
             s_lab = f"S: {s_hab}"
-            # Skip if node doesn't exist or no remaining units
+            # Only process if this surplus is actually a node in the diagram
             if s_lab not in idx:
                 continue
+            
             s_band = str(s['distinctiveness'])
             remaining = float(s.get('surplus_remaining_units', 0.0))
-            # Only create flow if there's actual leftover (stricter check)
+            
+            # Only create flow to Total NG if there's truly leftover units
+            # The remaining value should already have habitat→habitat and Low→Headline deducted
             if remaining > min_link:
                 sources.append(idx[s_lab]); targets.append(idx[total_ng])
                 values.append(remaining); lcolors.append(_rgba(s_band, 0.5))
