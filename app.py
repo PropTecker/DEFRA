@@ -762,7 +762,7 @@ with tabs[0]:
                     "surplus_habitat": clean_text(s["habitat"]),
                     "surplus_broad": clean_text(s["broad_group"]),
                     "surplus_band": "Low",
-                    "units_transferred": round(give, 6),
+                    "units_transferred": round(give, 7),
                     "flow_type": "low→headline"
                 })
                 to_cover -= give
