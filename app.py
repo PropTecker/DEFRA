@@ -557,25 +557,25 @@ def build_area_explanation(
 
     flows = alloc.get("allocation_flows", pd.DataFrame())
     if not flows.empty:
-        lines.append("**On-site offsets applied (by trading rules):**")
+        lines.append("On-site offsets applied (by trading rules):")
         for (dh, db, dband), grp in flows.groupby(["deficit_habitat","deficit_broad","deficit_band"], dropna=False):
             total = grp["units_transferred"].sum()
-            bullet = f"- **{dh}** ({dband}{', ' + db if db else ''}) — deficit reduced by **{total:.4f}** units via:"
+            bullet = f"- {dh} ({dband}{', ' + db if db else ''}) — deficit reduced by {total:.4f} units via:"
             sub = []
             for _, r in grp.sort_values("units_transferred", ascending=False).iterrows():
-                sub.append(f"    - {r['surplus_habitat']} ({r['surplus_band']}{', ' + r['surplus_broad'] if r['surplus_broad'] else ''}) → **{r['units_transferred']:.4f}**")
+                sub.append(f"    - {r['surplus_habitat']} ({r['surplus_band']}{', ' + r['surplus_broad'] if r['surplus_broad'] else ''}) → {r['units_transferred']:.4f}")
             lines.append(bullet)
             lines.extend(sub)
     else:
-        lines.append("**On-site offsets applied:** none matched by trading rules.")
+        lines.append("On-site offsets applied: none matched by trading rules.")
 
     residuals = alloc.get("residual_off_site", pd.DataFrame())
     if not residuals.empty:
-        lines.append("\n**Habitat-specific residuals still to mitigate off-site:**")
+        lines.append("\nHabitat-specific residuals still to mitigate off-site:")
         for _, r in residuals.iterrows():
-            lines.append(f"- {r['habitat']} ({r['distinctiveness']}{', ' + str(r['broad_group']) if pd.notna(r['broad_group']) and str(r['broad_group']).strip() else ''}) → **{float(r['unmet_units_after_on_site_offset']):.4f}** units")
+            lines.append(f"- {r['habitat']} ({r['distinctiveness']}{', ' + str(r['broad_group']) if pd.notna(r['broad_group']) and str(r['broad_group']).strip() else ''}) → {float(r['unmet_units_after_on_site_offset']):.4f} units")
     else:
-        lines.append("\n**Habitat-specific residuals:** none remain after on-site offsets.")
+        lines.append("\nHabitat-specific residuals: none remain after on-site offsets.")
 
     H = 0.0 if headline_def is None else float(headline_def)
     used_low = 0.0 if applied_low_to_headline is None else float(applied_low_to_headline)
@@ -583,19 +583,19 @@ def build_area_explanation(
     NG = 0.0 if remaining_ng_to_quote is None else float(remaining_ng_to_quote)
 
     lines.append(
-        f"\n**Headline (10% Net Gain):** requirement **{H:.4f}** units. "
-        f"Available Low surplus **{low_available:.4f}** → applied **{used_low:.4f}**, leaving **{R:.4f}**."
+        f"\nHeadline (10% Net Gain): requirement {H:.4f} units. "
+        f"Available Low surplus {low_available:.4f} → applied {used_low:.4f}, leaving {R:.4f}."
     )
 
     if ng_flow_rows:
         lines.append("  - Low surplus used against Headline came from:")
         for r in ng_flow_rows:
-            lines.append(f"    - {r['surplus_habitat']} ({r['surplus_band']}{', ' + r['surplus_broad'] if r['surplus_broad'] else ''}) → **{r['units_transferred']:.4f}**")
+            lines.append(f"    - {r['surplus_habitat']} ({r['surplus_band']}{', ' + r['surplus_broad'] if r['surplus_broad'] else ''}) → {r['units_transferred']:.4f}")
 
     if NG > 1e-9:
-        lines.append(f"**Net Gain remainder to quote (after habitat residuals):** **{NG:.4f}** units.")
+        lines.append(f"Net Gain remainder to quote (after habitat residuals): {NG:.4f} units.")
     else:
-        lines.append("**Net Gain remainder:** fully covered (no additional NG units to buy).")
+        lines.append("Net Gain remainder: fully covered (no additional NG units to buy).")
 
     return "\n".join(lines)
 
@@ -665,7 +665,7 @@ def build_sankey_requirements_left(
             residual_map[f"D: {row['habitat']}"] = float(pd.to_numeric(row["unmet_units_after_on_site_offset"], errors="coerce") or 0.0)
 
     agg = (
-        f.groupby(["deficit_habitat","deficit_band","surplus_habitat","surplus_band"], dropna=False)
+        f.groupby(["deficit_habitat","deficit_band","deficit_broad","surplus_habitat","surplus_band","surplus_broad"], dropna=False)
          ["units_transferred"].sum().reset_index()
     )
     agg = agg[agg["units_transferred"] > min_link]
@@ -684,12 +684,21 @@ def build_sankey_requirements_left(
 
     req_nodes_by_band = {b: [] for b in ["Very High","High","Medium","Low","Net Gain"]}
     sur_nodes_by_band = {b: [] for b in ["Very High","High","Medium","Low","Net Gain"]}
+    
+    # Track which surpluses are same-group (should be positioned more to the left)
+    same_group_surpluses = set()  # surplus labels that have same-group mitigation
 
     for _, r in agg.iterrows():
         d_lab = f"D: {r['deficit_habitat']}"
         s_lab = f"S: {r['surplus_habitat']}"
         d_band = str(r["deficit_band"]) if pd.notna(r["deficit_band"]) else "Other"
         s_band = str(r["surplus_band"]) if pd.notna(r["surplus_band"]) else "Other"
+        d_broad = clean_text(r.get("deficit_broad", ""))
+        s_broad = clean_text(r.get("surplus_broad", ""))
+        
+        # Check if same broad group
+        if d_broad and s_broad and d_broad == s_broad:
+            same_group_surpluses.add(s_lab)
         if d_band not in req_nodes_by_band and d_band != "Net Gain":  # ignore “Other”
             continue
         if s_band not in sur_nodes_by_band and s_band != "Net Gain":
@@ -726,11 +735,16 @@ def build_sankey_requirements_left(
             labels.append(lab); colors.append(_rgb(band)); xs.append(left_x); ys.append(req_ys[i])
             idx[lab] = len(labels) - 1
         # surpluses (right side of slice)
-        right_x = xcenter + 0.035
+        # Same-group surpluses positioned closer to left (nearer to requirements)
         surs = sur_nodes_by_band.get(band, [])
         sur_ys = _even_y(len(surs), offset=0.0 if band != "Low" else -0.03)
         for i, lab in enumerate(surs):
-            labels.append(lab); colors.append(_rgb(band)); xs.append(right_x); ys.append(sur_ys[i])
+            # Same-group mitigation: position closer to requirements (more to the left)
+            if lab in same_group_surpluses:
+                x_pos = xcenter + 0.015  # closer to center (left)
+            else:
+                x_pos = xcenter + 0.045  # further right
+            labels.append(lab); colors.append(_rgb(band)); xs.append(x_pos); ys.append(sur_ys[i])
             idx[lab] = len(labels) - 1
 
     # Total NG sink (far right)
@@ -789,11 +803,15 @@ def build_sankey_requirements_left(
         line=dict(width=0.4, color="rgba(120,120,120,0.25)"),
         label=labels, color=colors, x=xs, y=ys
     )
+    
+    # Configure label font to be bright orange for better visibility
+    textfont = dict(color="rgb(255, 140, 0)", size=11, family="Arial, sans-serif")
 
     fig = go.Figure(data=[go.Sankey(
         arrangement="snap",
         node=node_kwargs,
-        link=dict(source=sources, target=targets, value=values, color=lcolors)
+        link=dict(source=sources, target=targets, value=values, color=lcolors),
+        textfont=textfont
     )])
 
     # ---------------- Zebra stripes that actually line up ----------------
