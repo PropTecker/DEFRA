@@ -868,14 +868,22 @@ with tabs[0]:
             unsafe_allow_html=True
         )
         with st.expander("📊 Sankey — Requirements (left) → Surpluses (right) → Total Net Gain", expanded=False):
+            compact = st.toggle("Compact view", value=True, help="Slimmer nodes and tighter spacing")
             sankey_fig = build_sankey_requirements_left(
                 flows_matrix=flows_matrix,
                 residual_table=residual_table,
                 remaining_ng_to_quote=remaining_ng_to_quote,
-                deficit_table=alloc["deficits"]  # original per-habitat needs
+                deficit_table=alloc["deficits"],
+                height=520 if compact else 640,
+                compact_nodes=compact,
+                show_zebra=True
             )
-            st.plotly_chart(sankey_fig, use_container_width=True, theme="streamlit")
-
+            st.plotly_chart(
+                sankey_fig,
+                use_container_width=True,
+                theme="streamlit",
+                config={"displayModeBar": False, "responsive": True}
+            )
                         
 
 
