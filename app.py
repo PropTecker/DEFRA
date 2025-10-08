@@ -635,7 +635,6 @@ def build_sankey_requirements_left(
     remaining_ng_to_quote: float | None,
     deficit_table: pd.DataFrame,
     surplus_detail: pd.DataFrame | None = None,
-    headline_baseline: float | None = None,  # Original 10% requirement before deductions
     min_link: float = 1e-4,
     height: int = 400,          # was 560
     compact_nodes: bool = True, # default to compact
@@ -813,27 +812,20 @@ def build_sankey_requirements_left(
     
     total_surplus = total_low_to_headline + total_other_surplus
     
-    # Use the baseline 10% Headline requirement (before any deductions)
-    headline_requirement = headline_baseline or 0.0
+    # remaining_ng_to_quote is the NET after surpluses already deducted
+    # To show the FULL 10% baseline requirement, add surpluses back
+    net_requirement = remaining_ng_to_quote or 0.0
+    headline_requirement = net_requirement + total_surplus  # GROSS 10% baseline
     
-    # Calculate net amount to source after surpluses
-    net_headline = max(0.0, headline_requirement - total_surplus)
-    
-    # Headline → Total NG (baseline 10% requirement flows out)
-    # Surpluses flow IN, so node value = headline_requirement (the baseline)
+    # Headline → Total NG (full 10% requirement flows out; surpluses flow in)
+    # The node value will be headline_requirement (the FULL 10% baseline)
     if headline_requirement > min_link and (headline_left in idx):
         sources.append(idx[headline_left]); targets.append(idx[total_ng])
         values.append(headline_requirement); lcolors.append(_rgba("Net Gain", 0.85))
     
-    # If surplus exceeds Headline requirement, show Overall Surplus node
-    overall_surplus = max(0.0, total_surplus - headline_requirement)
-    if overall_surplus > min_link:
-        overall_surplus_node = "Overall Surplus (above 10% requirement)"
-        labels.append(overall_surplus_node); colors.append(_rgb("Net Gain")); xs.append(0.98); ys.append(0.08)
-        idx[overall_surplus_node] = len(labels) - 1
-        # Excess surplus flows from Headline to Overall Surplus node
-        sources.append(idx[headline_left]); targets.append(idx[overall_surplus_node])
-        values.append(overall_surplus); lcolors.append(_rgba("Net Gain", 0.6))
+    # Note: If surpluses exceed what's needed, remaining_ng_to_quote would be 0
+    # So headline_requirement = 0 + total_surplus, showing the surplus amount
+    # No need for separate "Overall Surplus" node in this flow model
 
     # If no links, show friendly placeholder
     if not values:
@@ -1116,7 +1108,6 @@ with tabs[0]:
                 remaining_ng_to_quote=remaining_ng_to_quote,
                 deficit_table=alloc["deficits"],
                 surplus_detail=surplus_detail_for_sankey,
-                headline_baseline=headline_def,  # Pass the original 10% requirement
                 height=500,
                 compact_nodes=True,
                 show_zebra=True
