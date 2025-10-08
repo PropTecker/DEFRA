@@ -635,6 +635,7 @@ def build_sankey_requirements_left(
     remaining_ng_to_quote: float | None,
     deficit_table: pd.DataFrame,
     surplus_detail: pd.DataFrame | None = None,
+    headline_baseline: float | None = None,  # Original 10% requirement before deductions
     min_link: float = 1e-4,
     height: int = 400,          # was 560
     compact_nodes: bool = True, # default to compact
@@ -812,14 +813,14 @@ def build_sankey_requirements_left(
     
     total_surplus = total_low_to_headline + total_other_surplus
     
-    # Headline node shows the 10% requirement value
-    headline_requirement = remaining_ng_to_quote or 0.0
+    # Use the baseline 10% Headline requirement (before any deductions)
+    headline_requirement = headline_baseline or 0.0
     
     # Calculate net amount to source after surpluses
     net_headline = max(0.0, headline_requirement - total_surplus)
     
-    # Headline → Total NG (full requirement flows out; surpluses flow in)
-    # The node value will be headline_requirement
+    # Headline → Total NG (baseline 10% requirement flows out)
+    # Surpluses flow IN, so node value = headline_requirement (the baseline)
     if headline_requirement > min_link and (headline_left in idx):
         sources.append(idx[headline_left]); targets.append(idx[total_ng])
         values.append(headline_requirement); lcolors.append(_rgba("Net Gain", 0.85))
@@ -1115,6 +1116,7 @@ with tabs[0]:
                 remaining_ng_to_quote=remaining_ng_to_quote,
                 deficit_table=alloc["deficits"],
                 surplus_detail=surplus_detail_for_sankey,
+                headline_baseline=headline_def,  # Pass the original 10% requirement
                 height=500,
                 compact_nodes=True,
                 show_zebra=True
