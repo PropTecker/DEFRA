@@ -843,14 +843,15 @@ with tabs[0]:
             "</p></div>",
             unsafe_allow_html=True
         )
-        with st.expander("📊 Sankey — Banded (VH → High → Medium → Low → Net Gain)", expanded=False):
-            sankey_fig = build_sankey_banded_with_dual_ng(
+        with st.expander("📊 Sankey — Requirements (left) → Surpluses (right) → Total Net Gain", expanded=False):
+            sankey_fig = build_sankey_requirements_left(
                 flows_matrix=flows_matrix,
                 residual_table=residual_table,
                 remaining_ng_to_quote=remaining_ng_to_quote,
                 deficit_table=alloc["deficits"]  # original per-habitat needs
             )
             st.plotly_chart(sankey_fig, use_container_width=True, theme="streamlit")
+
                         
 
 
