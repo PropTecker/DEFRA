@@ -456,194 +456,179 @@ def build_area_explanation(
 
 # ---------- Sankey builder (fixed colors) ----------
 # ---------- Clean 3-layer Sankey (Surplus → Deficit → Bundled Sinks) ----------
+# ---------- Sankey: Deficits (left) → Surpluses (right) + NG pool (right-bottom) ----------
 import plotly.graph_objects as go
 
-# Base colors per band (as RGB tuples)
+# Base band colors (RGB tuples)
 _BAND_RGB = {
     "Very High": (123, 31, 162),   # purple
     "High":      (211, 47, 47),    # red
     "Medium":    (25, 118, 210),   # blue
     "Low":       (56, 142, 60),    # green
     "Net Gain":  (69, 90, 100),    # blue-grey
-    "Other":     (141, 110, 99),   # brown
+    "Other":     (120, 120, 120),  # neutral
 }
 
-def _node_rgb(band: str) -> str:
+def _rgb(band: str) -> str:
     r, g, b = _BAND_RGB.get(str(band), _BAND_RGB["Other"])
     return f"rgb({r},{g},{b})"
 
-def _link_rgba(band: str, alpha: float = 0.65) -> str:
+def _rgba(band: str, a: float = 0.65) -> str:
     r, g, b = _BAND_RGB.get(str(band), _BAND_RGB["Other"])
-    a = min(max(alpha, 0.0), 1.0)
+    a = min(max(a, 0.0), 1.0)
     return f"rgba({r},{g},{b},{a})"
 
-def _even_positions(n: int, x: float) -> tuple[list[float], list[float]]:
-    """Return ([x,...],[y,...]) for n nodes evenly spaced vertically at a given x."""
-    if n <= 0:
-        return [], []
-    ys = [i / (n + 1) for i in range(1, n + 1)]
-    xs = [x] * n
+def _even_positions(n: int, x: float, y_offset: float = 0.0) -> tuple[list[float], list[float]]:
+    if n <= 0: return [], []
+    ys = [i/(n+1) for i in range(1, n+1)]
+    xs = [x]*n
+    # slight global vertical offset if needed
+    ys = [min(max(y + y_offset, 0.02), 0.98) for y in ys]
     return xs, ys
 
-def build_area_sankey_clean(
+def build_area_sankey_deficits_left(
     flows_matrix: pd.DataFrame,
-    residual_table: pd.DataFrame,            # alloc["residual_off_site"]
-    remaining_ng_to_quote: Optional[float],  # computed NG remainder (>0 means a link to Off-site NG)
-    overall_surplus_after_all: float         # already computed in your KPI logic
+    residual_table: pd.DataFrame,             # alloc["residual_off_site"]
+    remaining_ng_to_quote: Optional[float],   # >0 => add NG pool
+    min_link: float = 1e-6
 ) -> go.Figure:
     """
-    Layered Sankey:
-      - Left: Surplus habitats (S: ...)
-      - Middle: Deficit habitats (D: ...), plus 'D: Net gain uplift (Headline)' if present in flows
-      - Right (bundled): Off-site (Habitat residuals), Off-site (Net Gain remainder), Overall surplus remaining
+    Left:  Deficit habitats + (optional) 'D: Net Gain after deductions'
+    Right: Surplus habitats + (optional) 'Off-site (Habitat residuals)' + 'Net Gain (after deductions)'
+    Links:
+      - Deficit habitat → Surplus habitat  (actual transferred units, color = surplus band)
+      - Each residual deficit → Off-site (Habitat residuals) sink
+      - D: Net Gain after deductions → Net Gain (after deductions) sink
     """
+    # 1) Prepare flows: aggregate identical pairs
     f = flows_matrix.copy() if flows_matrix is not None else pd.DataFrame()
+    if f.empty:
+        f = pd.DataFrame(columns=[
+            "deficit_habitat","deficit_band",
+            "surplus_habitat","surplus_band",
+            "units_transferred"
+        ])
     f["units_transferred"] = pd.to_numeric(f.get("units_transferred"), errors="coerce").fillna(0.0)
 
-    # Aggregate surplus→deficit flows to reduce clutter
-    if not f.empty:
-        agg = (
-            f.groupby(
-                ["surplus_habitat","surplus_band","deficit_habitat","deficit_band"],
-                dropna=False, as_index=False
-            )["units_transferred"].sum()
-        )
-        agg = agg[agg["units_transferred"] > 0]
-    else:
-        agg = pd.DataFrame(columns=["surplus_habitat","surplus_band","deficit_habitat","deficit_band","units_transferred"])
+    agg = (
+        f.groupby(
+            ["deficit_habitat","deficit_band","surplus_habitat","surplus_band"],
+            dropna=False, as_index=False
+        )["units_transferred"].sum()
+    )
+    agg = agg[agg["units_transferred"] > min_link]
 
-    # --- Build node lists (labels, colors, positions) ---
-    surplus_nodes = []   # ["S: habitat"]
-    surplus_bands  = []  # ["Low"/"Medium"/...]
-    deficit_nodes = []   # ["D: habitat" or "D: Net gain uplift (Headline)"]
-    deficit_bands  = []
+    # 2) Build node lists
+    deficit_nodes, deficit_bands = [], []
+    surplus_nodes, surplus_bands = [], []
 
-    # Surplus nodes from agg
-    for _, r in agg.iterrows():
-        s_lab = f"S: {r['surplus_habitat']}"
-        if s_lab not in surplus_nodes:
-            surplus_nodes.append(s_lab)
-            surplus_bands.append(str(r["surplus_band"]))
-
-    # Deficit nodes from agg
     for _, r in agg.iterrows():
         d_lab = f"D: {r['deficit_habitat']}"
         if d_lab not in deficit_nodes:
             deficit_nodes.append(d_lab)
             deficit_bands.append(str(r["deficit_band"]))
+        s_lab = f"S: {r['surplus_habitat']}"
+        if s_lab not in surplus_nodes:
+            surplus_nodes.append(s_lab)
+            surplus_bands.append(str(r["surplus_band"]))
 
-    # Make sure headline deficit node exists if we'll draw NG remainder later
-    if (remaining_ng_to_quote or 0.0) > 1e-9:
-        hnode = "D: Net gain uplift (Headline)"
-        if hnode not in deficit_nodes:
-            deficit_nodes.append(hnode)
-            deficit_bands.append("Net Gain")
-
-    # Right-side bundled sinks
-    sink_nodes = []
-    sink_bands = []
-
-    # Off-site (Habitat residuals) – sum of unmet habitat units
+    # Residual off-site sink?
     residual_total = 0.0
     if residual_table is not None and not residual_table.empty:
-        residual_total = float(pd.to_numeric(residual_table["unmet_units_after_on_site_offset"], errors="coerce").fillna(0.0).sum())
-    if residual_total > 1e-9:
-        sink_nodes.append("Off-site (Habitat residuals)")
-        sink_bands.append("Other")
+        residual_total = float(pd.to_numeric(residual_table["unmet_units_after_on_site_offset"], errors="coerce")
+                               .fillna(0.0).sum())
+    include_residual_sink = residual_total > min_link
 
-    # Off-site (Net Gain remainder)
-    if (remaining_ng_to_quote or 0.0) > 1e-9:
-        sink_nodes.append("Off-site (Net Gain remainder)")
-        sink_bands.append("Net Gain")
+    include_ng_pool = (remaining_ng_to_quote or 0.0) > min_link
 
-    # Overall surplus remaining
-    if (overall_surplus_after_all or 0.0) > 1e-9:
-        sink_nodes.append("Overall surplus remaining")
-        sink_bands.append("Other")
+    # 3) Assemble labels/colors with fixed layers
+    labels: list[str] = []
+    colors: list[str] = []
+    xs: list[float] = []
+    ys: list[float] = []
 
-    # If absolutely nothing to show
-    if not surplus_nodes and not deficit_nodes and not sink_nodes:
-        fig = go.Figure()
-        fig.update_layout(margin=dict(l=10,r=10,t=10,b=10), height=380)
-        fig.add_annotation(text="No flows to display", showarrow=False, x=0.5, y=0.5, xref="paper", yref="paper")
-        return fig
+    # Left column: all deficit habitats (+ optional NG deficit node at the end)
+    dx, dy = _even_positions(len(deficit_nodes), x=0.0, y_offset=0.0)
+    labels += deficit_nodes
+    colors += [_rgb(b) for b in deficit_bands]
+    xs += dx; ys += dy
 
-    # Assemble node indices
-    labels = surplus_nodes + deficit_nodes + sink_nodes
-    colors = (
-        [_node_rgb(b) for b in surplus_bands] +
-        [_node_rgb(b) for b in deficit_bands] +
-        [_node_rgb(b) for b in sink_bands]
-    )
+    # Add "D: Net Gain after deductions" as a *left* node (last in left column)
+    if include_ng_pool:
+        labels.append("D: Net Gain after deductions")
+        colors.append(_rgb("Net Gain"))
+        xs.append(0.0)
+        # hang it slightly lower than the last deficit
+        ys.append(min(0.95, (dy[-1] if dy else 0.5) + 0.08))
 
-    # Positions: x=0 (surplus), x=0.5 (deficit), x=1.0 (sinks)
-    sx, sy = _even_positions(len(surplus_nodes), 0.00)
-    dx, dy = _even_positions(len(deficit_nodes), 0.50)
-    tx, ty = _even_positions(len(sink_nodes), 1.00)
-    xs = sx + dx + tx
-    ys = sy + dy + ty
+    # Right column (upper): surplus habitats
+    sx, sy = _even_positions(len(surplus_nodes), x=1.0, y_offset=-0.05)
+    labels += surplus_nodes
+    colors += [_rgb(b) for b in surplus_bands]
+    xs += sx; ys += sy
 
-    # --- Links ---
-    sources, targets, values, link_colors = [], [], [], []
+    # Right column (lower sinks): Residual & NG pool (stacked at the bottom)
+    sink_labels, sink_colors, sink_x, sink_y = [], [], [], []
 
-    # Surplus → Deficit
+    if include_residual_sink:
+        sink_labels.append("Off-site (Habitat residuals)")
+        sink_colors.append(_rgb("Other"))
+        sink_x.append(1.0); sink_y.append(0.85)
+
+    if include_ng_pool:
+        sink_labels.append("Net Gain (after deductions)")
+        sink_colors.append(_rgb("Net Gain"))
+        sink_x.append(1.0); sink_y.append(0.93)
+
+    labels += sink_labels
+    colors += sink_colors
+    xs += sink_x; ys += sink_y
+
+    # Node index helpers
+    idx = {lab: i for i, lab in enumerate(labels)}
+
+    # 4) Links
+    sources, targets, values, lcolors = [], [], [], []
+
+    # Deficit → Surplus
     for _, r in agg.iterrows():
-        s_lab = f"S: {r['surplus_habitat']}"
         d_lab = f"D: {r['deficit_habitat']}"
-        if s_lab in labels and d_lab in labels:
-            s_idx = labels.index(s_lab)
-            d_idx = labels.index(d_lab)
-            sources.append(s_idx)
-            targets.append(d_idx)
+        s_lab = f"S: {r['surplus_habitat']}"
+        if d_lab in idx and s_lab in idx:
+            sources.append(idx[d_lab])
+            targets.append(idx[s_lab])
             values.append(float(r["units_transferred"]))
-            link_colors.append(_link_rgba(str(r["surplus_band"]), 0.65))
+            lcolors.append(_rgba(str(r["surplus_band"]), 0.7))
 
-    # Deficit → Off-site (Habitat residuals) [bundled to one sink]
-    if residual_total > 1e-9:
-        sink_idx = labels.index("Off-site (Habitat residuals)")
-        # Link EACH deficit that has a residual to the single sink
+    # Deficit residuals → Off-site (Habitat residuals)
+    if include_residual_sink:
+        sink_i = idx["Off-site (Habitat residuals)"]
+        res_map = {}
         if residual_table is not None and not residual_table.empty:
-            # build a quick lookup of residual per deficit habitat name
-            res_map = {f"D: {str(h)}": float(v) for h, v in zip(residual_table["habitat"], residual_table["unmet_units_after_on_site_offset"])}
-            for d_lab, d_band in zip(deficit_nodes, deficit_bands):
-                if d_lab in res_map and res_map[d_lab] > 1e-9:
-                    d_idx = labels.index(d_lab)
-                    sources.append(d_idx)
-                    targets.append(sink_idx)
-                    values.append(res_map[d_lab])
-                    link_colors.append("rgba(158,158,158,0.6)")
+            for _, row in residual_table.iterrows():
+                lab = f"D: {row['habitat']}"
+                res_map[lab] = res_map.get(lab, 0.0) + float(row["unmet_units_after_on_site_offset"])
+        for d_lab, amount in res_map.items():
+            if amount > min_link and d_lab in idx:
+                sources.append(idx[d_lab])
+                targets.append(sink_i)
+                values.append(amount)
+                lcolors.append("rgba(120,120,120,0.6)")
 
-    # Headline (Net Gain) → Off-site NG
-    if (remaining_ng_to_quote or 0.0) > 1e-9:
-        h_lab = "D: Net gain uplift (Headline)"
-        if h_lab in labels:
-            h_idx = labels.index(h_lab)
-            sink_idx = labels.index("Off-site (Net Gain remainder)")
-            sources.append(h_idx)
-            targets.append(sink_idx)
+    # Net Gain remainder → NG pool
+    if include_ng_pool:
+        src = idx.get("D: Net Gain after deductions")
+        dst = idx.get("Net Gain (after deductions)")
+        if src is not None and dst is not None:
+            sources.append(src)
+            targets.append(dst)
             values.append(float(remaining_ng_to_quote))
-            link_colors.append(_link_rgba("Net Gain", 0.7))
+            lcolors.append(_rgba("Net Gain", 0.8))
 
-    # Unused overall surplus → Overall surplus sink
-    if (overall_surplus_after_all or 0.0) > 1e-9:
-        # add from a virtual pooled node so it reads clearly
-        pooled_lab = "S: Unused surplus (pooled)"
-        if pooled_lab not in labels:
-            labels.insert(0, pooled_lab)
-            colors.insert(0, _node_rgb("Other"))
-            xs.insert(0, 0.00)
-            ys.insert(0, -0.05 if sy else 0.5)  # slight offset if needed
-        s_idx = labels.index(pooled_lab)
-        t_idx = labels.index("Overall surplus remaining")
-        sources.append(s_idx)
-        targets.append(t_idx)
-        values.append(float(overall_surplus_after_all))
-        link_colors.append("rgba(120,120,120,0.55)")
-
-    # Safety: if no links, display a friendly empty fig
+    # Nothing to show? return friendly fig
     if not values:
         fig = go.Figure()
-        fig.update_layout(margin=dict(l=10,r=10,t=10,b=10), height=380)
+        fig.update_layout(margin=dict(l=10, r=10, t=10, b=10), height=380)
         fig.add_annotation(text="No flows to display", showarrow=False, x=0.5, y=0.5, xref="paper", yref="paper")
         return fig
 
@@ -655,10 +640,11 @@ def build_area_sankey_clean(
             label=labels, color=colors,
             x=xs, y=ys
         ),
-        link=dict(source=sources, target=targets, value=values, color=link_colors)
+        link=dict(source=sources, target=targets, value=values, color=lcolors)
     )])
-    fig.update_layout(margin=dict(l=10, r=10, t=10, b=10), height=540)
+    fig.update_layout(margin=dict(l=10, r=10, t=10, b=10), height=560)
     return fig
+
 
 
 
