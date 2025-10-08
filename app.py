@@ -490,9 +490,9 @@ def build_sankey_requirements_left(
     remaining_ng_to_quote: float | None,
     deficit_table: pd.DataFrame,
     min_link: float = 1e-4,
-    height: int = 560,                 # ← tweakable
-    compact_nodes: bool = True,        # ← slimmer nodes in compact mode
-    show_zebra: bool = True            # ← draw zebra bands + headers
+    height: int = 400,          # was 560
+    compact_nodes: bool = True, # default to compact
+    show_zebra: bool = True
 ) -> go.Figure:
     # ----- (all your existing data-prep code stays the same) -----
     f = flows_matrix.copy() if flows_matrix is not None else pd.DataFrame()
@@ -638,11 +638,10 @@ def build_sankey_requirements_left(
         fig.add_annotation(text="No flows to display", showarrow=False, x=0.5, y=0.5, xref="paper", yref="paper")
         return fig
 
-    # Node cosmetics (slimmer when compact)
     node_kwargs = dict(
-        pad=10 if compact_nodes else 14,
-        thickness=14 if compact_nodes else 18,
-        line=dict(width=0.5, color="rgba(120,120,120,0.25)"),
+        pad=8 if compact_nodes else 12,        # was 10/14
+        thickness=12 if compact_nodes else 16, # was 14/18
+        line=dict(width=0.4, color="rgba(120,120,120,0.25)"),
         label=labels, color=colors, x=xs, y=ys
     )
 
@@ -690,18 +689,17 @@ def build_sankey_requirements_left(
                 layer="below", line=dict(width=0), fillcolor=fill
             ))
             annotations.append(dict(
-                text=f"<b>{lab}</b>",
-                x=xc, y=0.995, xref="paper", yref="paper",
-                showarrow=False, yanchor="top",
-                font=dict(size=12)
+                text=f"<b>{lab}</b>", x=xc, y=0.995, xref="paper", yref="paper",
+                showarrow=False, yanchor="top", font=dict(size=11)   # was 12
             ))
 
         fig.update_layout(shapes=shapes, annotations=annotations)
 
     # Tight margins so it fits the expander; no autosizing creep
     fig.update_layout(
-        margin=dict(l=6, r=6, t=34 if show_zebra else 8, b=6),
-        height=max(420, height)
+        margin=dict(l=6, r=6, t=28 if show_zebra else 6, b=4),  # smaller top/bottom
+        height=max(360, height),  # guard but smaller target
+        autosize=False
     )
 
     # Prevent Plotly from expanding beyond container width
@@ -890,22 +888,22 @@ with tabs[0]:
             unsafe_allow_html=True
         )
         with st.expander("📊 Sankey — Requirements (left) → Surpluses (right) → Total Net Gain", expanded=False):
-            compact = st.toggle("Compact view", value=True)
             sankey_fig = build_sankey_requirements_left(
                 flows_matrix=flows_matrix,
                 residual_table=residual_table,
                 remaining_ng_to_quote=remaining_ng_to_quote,
                 deficit_table=alloc["deficits"],
-                height=520 if compact else 640,
-                compact_nodes=compact,
+                height=380,            # <= compact height
+                compact_nodes=True,    # force compact
                 show_zebra=True
             )
             st.plotly_chart(
                 sankey_fig,
                 use_container_width=True,
                 theme="streamlit",
-                config={"displayModeBar": False, "responsive": True, "staticPlot": False}
+                config={"displayModeBar": False, "responsive": True}
             )
+
         
                                 
 
