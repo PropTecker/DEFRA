@@ -774,8 +774,8 @@ def build_sankey_requirements_left(
             sources.append(idx[d_lab]); targets.append(idx[total_ng]); values.append(residual)
             lcolors.append("rgba(120,120,120,0.6)")
 
-    # Surplus → Headline (Low→Headline flows)
-    # These show surpluses reducing the Headline requirement
+    # Headline → Surplus (Low→Headline flows, reversed direction)
+    # These show the Headline requirement being met by surpluses
     low_to_head = f[
         (f["deficit_habitat"].astype(str).str.strip().str.lower() == "net gain uplift (headline)")
         & (f["units_transferred"] > min_link)
@@ -785,13 +785,13 @@ def build_sankey_requirements_left(
         s_lab = f"S: {rr['surplus_habitat']}"
         if (headline_left in idx) and (s_lab in idx):
             amt = float(rr["units_transferred"])
-            # Flow FROM surplus TO Headline (reduces what needs to be sourced)
-            sources.append(idx[s_lab]); targets.append(idx[headline_left]); values.append(amt)
+            # Flow FROM Headline TO surplus (shows requirement being met)
+            sources.append(idx[headline_left]); targets.append(idx[s_lab]); values.append(amt)
             lcolors.append(_rgba("Low", 0.78))
             total_low_to_headline += amt
     
-    # Other surplus leftovers → Headline
-    # These also reduce the Headline requirement
+    # Headline → Other surplus leftovers (reversed direction)
+    # These also show the Headline requirement being met by surpluses
     total_other_surplus = 0.0
     if surplus_detail is not None and not surplus_detail.empty:
         for _, s in surplus_detail.iterrows():
@@ -804,9 +804,9 @@ def build_sankey_requirements_left(
             s_band = str(s['distinctiveness'])
             remaining = float(s.get('surplus_remaining_units', 0.0))
             
-            # Flow surplus TO Headline to show it reduces requirement
+            # Flow FROM Headline TO surplus (shows requirement being met)
             if remaining > min_link:
-                sources.append(idx[s_lab]); targets.append(idx[headline_left]); values.append(remaining)
+                sources.append(idx[headline_left]); targets.append(idx[s_lab]); values.append(remaining)
                 lcolors.append(_rgba(s_band, 0.5))
                 total_other_surplus += remaining
     
@@ -817,9 +817,10 @@ def build_sankey_requirements_left(
     net_requirement = remaining_ng_to_quote or 0.0
     headline_requirement = net_requirement + total_surplus  # GROSS 10% baseline
     
-    # Headline → Total NG: Only NET requirement flows out (after surpluses deducted)
-    # Surpluses flow IN, so the node shows FULL 10% but only NET flows OUT
-    # Example: 10% = 10 units, surplus = 3 units → node shows 10, but only 7 flows out
+    # Headline → Total NG: NET requirement flows out (after surpluses deducted)
+    # With reversed flows: Headline has FULL requirement flowing out to both surpluses and Total NG
+    # Example: 10% = 10 units → 3 units flow to surpluses, 7 units flow to Total NG
+    # Node now shows 10 units (sum of outflows) instead of 7 units
     if net_requirement > min_link and (headline_left in idx):
         sources.append(idx[headline_left]); targets.append(idx[total_ng])
         values.append(net_requirement); lcolors.append(_rgba("Net Gain", 0.85))
